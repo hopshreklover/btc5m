@@ -1,0 +1,2 @@
+polymarket-client>=0.18,<0.19
+pytest>=8

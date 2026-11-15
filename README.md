@@ -1,0 +1,152 @@
+# btc5m
+
+A trading bot for Polymarket's "Bitcoin Up or Down – 5 Minutes" markets.
+
+Each market pays $1 per share on **Up** if the Chainlink BTC/USD price at the
+end of a 5-minute window is at or above the price at its start, otherwise on
+**Down**. The bot prices that bet from the live oracle price, compares it with
+the order book, and only trades when the book is offering a price that is still
+good after fees and after assuming the market moves against it while the order
+is in flight.
+
+It starts in **paper mode** (pretend money, real market data). Real orders are
+only sent by the `live` command, and only with an explicit flag.
+
+> Nothing here is a promise of profit. These markets are crowded with fast,
+> well-funded traders, and the fee is highest exactly where the outcome is most
+> uncertain. Treat paper results as the evidence, and expect them to be
+> unflattering.
+
+## Setup
+
+Needs Python 3.11 or newer.
+
+```bash
+python -m venv .venv
+```
+
+```bash
+.venv\Scripts\python -m pip install -r requirements.txt
+```
+
+(On macOS/Linux use `.venv/bin/python`.) Then check everything works:
+
+```bash
+.venv\Scripts\python -m pytest tests -q
+```
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `python -m btc5m paper` | Trade the live markets with pretend money. Logs to `data/paper/`, records every event to `data/recordings/`. |
+| `python -m btc5m report` | Summarise logged results (win rate, P&L, fees, drawdown, outcome mismatches). |
+| `python -m btc5m backtest "data/recordings/*.jsonl"` | Replay recordings through the same engine, e.g. with different settings. |
+| `python -m btc5m fetch --hours 24` | Download recent BTC-USD prices from Coinbase (public, no account). |
+| `python -m btc5m calibrate` | Score the pricing model against those prices, or against the bot's own recorded oracle prices with `--recordings "data/recordings/*.jsonl"`. |
+| `python -m btc5m sim` | Offline end-to-end run against a made-up market maker. |
+| `python -m btc5m live --i-accept-real-money-risk` | Trade with real money. |
+
+Settings: copy `config.example.toml` to `config.toml` and pass
+`--config config.toml` before the command. Every setting and its default is in
+`btc5m/config.py`.
+
+## How it decides
+
+1. **Strike.** The oracle tick stamped exactly at the window start (or the
+   market's own "price to beat" when it is published). If the bot joins
+   mid-window and never saw that tick, it sits the window out rather than guess.
+2. **Fair value.** `P(up) = F(ln(price / strike) / (vol × √seconds_left))`,
+   with `vol` from a blend of fast and slow moving averages of squared returns
+   and `F` a fat-tailed (Student-t) distribution.
+3. **Conservative probability.** The price is assumed to move one standard
+   deviation against the trade during the order's latency before the edge is
+   measured. Close to expiry and close to the strike this wipes out most
+   apparent edges, which is the point.
+4. **Edge after fees.** For each ask level: `edge = P − price − fee`, with
+   Polymarket's taker fee `rate × (p × (1 − p))^exponent` read from the market.
+   It takes levels only while `edge ≥ min_edge`.
+5. **Size.** Fractional Kelly, capped per order, per window and by bankroll.
+6. **Exit.** If the bid ever exceeds what the shares are worth by `exit_edge`
+   after fees, it sells; otherwise it holds to settlement.
+
+It will not trade when: the oracle feed is older than 3 seconds, the book is
+stale, the local clock disagrees with the oracle's by more than 2.5 seconds,
+volatility has not warmed up, the window is in its first 8 or last 6 seconds,
+the price is outside 0.08–0.92, the daily loss limit is hit, a loss streak
+triggered a cool-down, or a file named `STOP` exists in the working folder.
+
+## What is better than the usual versions of this bot
+
+- **Fees are in the decision**, not discovered afterwards.
+- **A priced bet instead of a rule of thumb** ("buy whichever side leads with 30
+  seconds left"): the bot only acts when the book disagrees with a calibrated
+  probability by more than costs.
+- **Adverse-move and latency buffer**, so it does not pay 0.95 for a coin flip
+  that looks decided for half a second.
+- **Hard risk limits** that can only block trades, never add them.
+- **One engine for paper, live and replay**, so a backtest exercises the code
+  that trades.
+- **Paper fills are pessimistic**: delayed, limited to visible size, never the
+  same liquidity twice.
+- **It checks itself**: local outcome vs. the exchange's resolution, logged as
+  `MISMATCH` and counted by `report`.
+
+## Going live
+
+1. Run `paper` for several days. Look at `report`. If return on stake is not
+   clearly positive after fees over a few hundred traded windows, do not go
+   live. Zero `outcome_mismatches` is a precondition.
+2. Fund a Polymarket account you are legally allowed to use where you live.
+   The bot does not and will not work around regional restrictions.
+3. Put the wallet key in the environment (never in a file in this folder):
+   `POLYMARKET_PRIVATE_KEY`, and `POLYMARKET_WALLET` if you trade through a
+   wallet other than the key's default one.
+4. Start small: `--bankroll 50` with a `config.toml` lowering `max_trade_usd`
+   and `max_window_usd`.
+5. `bankroll` is the bot's own ledger, not your wallet balance. Winning shares
+   have to be redeemed on Polymarket before that money is spendable again; the
+   bot does not redeem.
+
+If an order's outcome is ever unknown (network error mid-order, implausible
+fill amounts, an order that never resolves), the bot writes the `STOP` file and
+stops opening positions until you delete it.
+
+## Known limits
+
+- **The Polymarket connection has not been run against the live exchange.**
+  It was written against the official SDK (`polymarket-client` 0.18) and
+  tested against that SDK's own types, but the network this was built on
+  blocks polymarket.com. The first paper session is the real integration test:
+  watch for the strike appearing, books updating and `SETTLE` lines agreeing
+  with the site.
+- The live order path is tested only against a stand-in client. Fees on live
+  fills are estimated from the fee formula; the exchange's figures are the truth.
+- The public oracle price stream is marked deprecated in the SDK. If no prices
+  arrive, `--auth-prices` switches to the authenticated stream (needs the key).
+- `sim` uses invented order books. Its profit means nothing about the real
+  market; it exists to test the plumbing.
+- `calibrate` uses Coinbase prices, not the Chainlink stream the market settles
+  on. Close, not identical. The default `vol_mult = 1.15` comes from one day of
+  Coinbase data (288 windows), where the unadjusted model was slightly
+  overconfident. Re-run it on your own recordings after a few days of paper
+  trading: `python -m btc5m calibrate --recordings "data/recordings/*.jsonl"`.
+
+## Layout
+
+```
+btc5m/
+  config.py         settings
+  model.py          volatility estimate and P(up)
+  book.py           order book and fee curve
+  strategy.py       edge, sizing, entry/exit decisions (pure functions)
+  risk.py           account-level limits
+  broker.py         paper fills
+  engine.py         window lifecycle, settlement, glue
+  polymarket_io.py  market discovery, streams, live orders (official SDK)
+  journal.py        CSV logs and event recording
+  coinbase.py       price download
+  calibrate.py      model scoring
+  sim.py            synthetic market for offline runs
+tests/              37 tests, no network needed
+```

@@ -1,0 +1,27 @@
+# Copy to config.toml and pass with:  python -m btc5m --config config.toml paper
+# Every key is optional; anything left out keeps the default in btc5m/config.py.
+
+bankroll = 200.0          # capital the bot may treat as its own
+kelly_fraction = 0.25     # 0.25 = quarter Kelly
+max_trade_usd = 15.0      # per order, fees included
+max_window_usd = 30.0     # per 5-minute market
+max_trades_per_window = 3
+
+min_edge = 0.03           # edge per share required after fees
+exit_edge = 0.04          # sell when the bid beats fair value by this much
+min_price = 0.08          # never buy outside this price band
+max_price = 0.92
+
+vol_mult = 1.15           # tune with `python -m btc5m calibrate`
+student_nu = 4.0          # tail thickness (200 = normal)
+latency_s = 0.6           # assumed decision-to-fill delay
+adverse_sigmas = 1.0      # how hard to assume the price moves against us meanwhile
+
+no_trade_first_s = 8.0
+no_trade_last_s = 6.0
+
+daily_loss_limit = 40.0   # stop opening positions for the UTC day
+max_loss_streak = 4       # losing windows in a row before a pause
+cooldown_windows = 6
+
+spot_lead = false         # also use Coinbase's ticker as a faster price signal
