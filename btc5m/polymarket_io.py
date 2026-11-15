@@ -53,6 +53,10 @@ def window_event(event, start: int, cfg: Config) -> dict:
         "slug": event.slug or "", "up": tokens["up"], "down": tokens["down"],
         "fee_rate": rate, "fee_exp": exponent,
         "min_size": float(trading.minimum_order_size or 5),
+        "taker_delay_s": max(
+            float(getattr(trading, "taker_delay_ms", None) or 0) / 1000.0,
+            float(getattr(trading, "seconds_delay", None) or 0),
+        ),
     }
     strike = (event.metadata or {}).get("priceToBeat")
     try:
@@ -103,7 +107,23 @@ class _Retry:
         return min(2.0 * 2 ** (self._n - 1), 30.0)
 
 
-async def _oracle_task(pub, q: asyncio.Queue, log: Log) -> None:
+class FeedStalled(Exception):
+    pass
+
+
+async def _events(handle, stall_s: float):
+    """Iterate a subscription, but treat prolonged silence as a failure. A stream
+    can stay connected and simply stop delivering; resubscribing fixes that."""
+    while True:
+        try:
+            yield await asyncio.wait_for(handle.__anext__(), timeout=stall_s)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            raise FeedStalled(f"silent for {stall_s:.0f}s") from None
+
+
+async def _oracle_task(pub, q: asyncio.Queue, log: Log, stall_s: float = 15.0) -> None:
     from polymarket.streams import CryptoPricesSpec
 
     spec = CryptoPricesSpec(topic="prices.crypto.chainlink", symbols=[ORACLE_SYMBOL])
@@ -113,7 +133,7 @@ async def _oracle_task(pub, q: asyncio.Queue, log: Log) -> None:
         try:
             handle = await pub.subscribe(spec)
             try:
-                async for ev in handle:
+                async for ev in _events(handle, stall_s):
                     p = ev.payload
                     if p.symbol.lower() != ORACLE_SYMBOL:
                         continue
@@ -131,7 +151,7 @@ async def _oracle_task(pub, q: asyncio.Queue, log: Log) -> None:
         await asyncio.sleep(delay)
 
 
-async def _auth_oracle_task(secure, q: asyncio.Queue, log: Log) -> None:
+async def _auth_oracle_task(secure, q: asyncio.Queue, log: Log, stall_s: float = 15.0) -> None:
     """Authenticated price stream (the SDK's replacement for the public one)."""
     from polymarket.streams import CryptoPriceSpec
 
@@ -142,7 +162,7 @@ async def _auth_oracle_task(secure, q: asyncio.Queue, log: Log) -> None:
         try:
             handle = await secure.subscribe(spec)
             try:
-                async for ev in handle:
+                async for ev in _events(handle, stall_s):
                     p = ev.payload
                     retry.ok()
                     if ev.type == "update":
@@ -164,7 +184,7 @@ async def _auth_oracle_task(secure, q: asyncio.Queue, log: Log) -> None:
         await asyncio.sleep(delay)
 
 
-async def _book_task(pub, win: dict, q: asyncio.Queue, log: Log) -> None:
+async def _book_task(pub, win: dict, q: asyncio.Queue, log: Log, stall_s: float = 15.0) -> None:
     from polymarket.streams import MarketSpec
 
     spec = MarketSpec(token_ids=[win["up"], win["down"]], custom_feature_enabled=True)
@@ -178,14 +198,20 @@ async def _book_task(pub, win: dict, q: asyncio.Queue, log: Log) -> None:
                     left = until - time.time()
                     if left <= 0:
                         return
-                    ev = await asyncio.wait_for(handle.__anext__(), timeout=left)
+                    try:
+                        ev = await asyncio.wait_for(
+                            handle.__anext__(), timeout=min(left, stall_s + 5.0))
+                    except asyncio.TimeoutError:
+                        if win["start"] <= time.time() < win["end"]:
+                            raise FeedStalled(f"silent for {stall_s + 5.0:.0f}s") from None
+                        continue          # quiet before the open or after the close is normal
                     retry.ok()
                     for out in market_events(ev, time.time()):
                         q.put_nowait(out)
             finally:
                 await handle.close()
-        except (asyncio.TimeoutError, StopAsyncIteration):
-            return
+        except StopAsyncIteration:
+            await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -217,7 +243,7 @@ async def _window_manager(pub, q: asyncio.Queue, cfg: Config, log: Log) -> None:
                 continue
             known.add(start)
             q.put_nowait(win)
-            task = asyncio.create_task(_book_task(pub, win, q, log))
+            task = asyncio.create_task(_book_task(pub, win, q, log, cfg.feed_stall_s))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
         known = {s for s in known if s >= cur - WINDOW_S}
@@ -370,7 +396,9 @@ async def run(
 
     mode = "live" if live else "paper"
     journal = Journal(Path(cfg.data_dir) / mode)
-    recorder = Recorder(Path(cfg.data_dir) / "recordings") if cfg.record else None
+    recorder = (Recorder(Path(cfg.data_dir) / "recordings", cfg.record_keep_days)
+                if cfg.record else None)
+    last_snap = 0
     q: asyncio.Queue = asyncio.Queue()
     secure = None
     tasks: list[asyncio.Task] = []
@@ -399,7 +427,8 @@ async def run(
                 broker.fee_lookup = fees
 
             jobs = [
-                _auth_oracle_task(secure, q, log) if auth_prices else _oracle_task(pub, q, log),
+                (_auth_oracle_task(secure, q, log, cfg.feed_stall_s) if auth_prices
+                 else _oracle_task(pub, q, log, cfg.feed_stall_s)),
                 _window_manager(pub, q, cfg, log),
                 _clock_task(q),
             ]
@@ -425,9 +454,16 @@ async def run(
                     last_px = ev["ts"]
                     log("!! no oracle prices for 60s. The public price stream may be "
                         "unavailable; try --auth-prices (needs POLYMARKET_PRIVATE_KEY).")
-                if recorder and ev["t"] != "clock":
-                    recorder.write(ev)
                 engine.on_event(ev)
+                if recorder:
+                    # Compact recording: every price tick, plus one top-of-book
+                    # snapshot per second instead of every raw book update.
+                    if ev["t"] in ("px", "win", "resolved"):
+                        recorder.write(ev)
+                    elif ev["t"] == "clock" and int(ev["ts"]) != last_snap:
+                        last_snap = int(ev["ts"])
+                        for snap in engine.book_snapshots(cfg.record_depth):
+                            recorder.write(snap)
         except asyncio.CancelledError:
             return holder[0] if holder else None
         finally:

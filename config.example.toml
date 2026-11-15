@@ -2,6 +2,7 @@
 # Every key is optional; anything left out keeps the default in btc5m/config.py.
 
 bankroll = 200.0          # capital the bot may treat as its own
+compound = false          # true: reinvest wins when sizing bets
 kelly_fraction = 0.25     # 0.25 = quarter Kelly
 max_trade_usd = 15.0      # per order, fees included
 max_window_usd = 30.0     # per 5-minute market
@@ -25,3 +26,6 @@ max_loss_streak = 4       # losing windows in a row before a pause
 cooldown_windows = 6
 
 spot_lead = false         # also use Coinbase's ticker as a faster price signal
+
+record = true             # prices plus one book snapshot per second, compressed
+record_keep_days = 14

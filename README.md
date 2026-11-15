@@ -39,8 +39,9 @@ python -m venv .venv
 
 | Command | What it does |
 | --- | --- |
-| `python -m btc5m paper` | Trade the live markets with pretend money. Logs to `data/paper/`, records every event to `data/recordings/`. |
-| `python -m btc5m report` | Summarise logged results (win rate, P&L, fees, drawdown, outcome mismatches). |
+| `python -m btc5m paper` | Trade the live markets with pretend money. Logs to `data/paper/`; records prices plus one book snapshot per second to `data/recordings/` (compressed, 14 days kept). |
+| `python -m btc5m report` | Summarise logged results, then break the buys down by entry price and by time left: what the bot predicted versus how often it actually won. `--mode NAME` reads another log folder. |
+| `python -m btc5m dashboard --host 0.0.0.0 --port 8501` | Serve the same results as a read-only web page (refreshes every minute). Defaults to localhost only. |
 | `python -m btc5m backtest "data/recordings/*.jsonl"` | Replay recordings through the same engine, e.g. with different settings. |
 | `python -m btc5m fetch --hours 24` | Download recent BTC-USD prices from Coinbase (public, no account). |
 | `python -m btc5m calibrate` | Score the pricing model against those prices, or against the bot's own recorded oracle prices with `--recordings "data/recordings/*.jsonl"`. |
@@ -87,8 +88,15 @@ triggered a cool-down, or a file named `STOP` exists in the working folder.
 - **Hard risk limits** that can only block trades, never add them.
 - **One engine for paper, live and replay**, so a backtest exercises the code
   that trades.
-- **Paper fills are pessimistic**: delayed, limited to visible size, never the
-  same liquidity twice.
+- **Paper fills assume the bot is slow and unlucky**: an order only fills
+  against size that was already quoted when the decision was made and stayed
+  there for the whole wait (the bot's latency plus the exchange's taker delay).
+  Pulled quotes are gone; liquidity that appears later does not count.
+- **Flat staking by default**: bets are sized off the starting bankroll, so a
+  good run does not inflate later bets and the results. Set `compound = true`
+  to reinvest.
+- **Streams that go silent are restarted** after 15 seconds instead of leaving
+  the bot idle.
 - **It checks itself**: local outcome vs. the exchange's resolution, logged as
   `MISMATCH` and counted by `report`.
 
@@ -145,8 +153,10 @@ btc5m/
   engine.py         window lifecycle, settlement, glue
   polymarket_io.py  market discovery, streams, live orders (official SDK)
   journal.py        CSV logs and event recording
+  analysis.py       where the profit or loss came from
+  dashboard.py      read-only results page
   coinbase.py       price download
   calibrate.py      model scoring
   sim.py            synthetic market for offline runs
-tests/              37 tests, no network needed
+tests/              43 tests, no network needed
 ```

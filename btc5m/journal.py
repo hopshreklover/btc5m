@@ -4,7 +4,9 @@ recording that `backtest` can replay."""
 from __future__ import annotations
 
 import csv
+import gzip
 import json
+import time
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,21 +54,39 @@ class Journal:
 
 
 class Recorder:
-    """Append every event as one JSON line, one file per UTC day."""
+    """Append events as gzip-compressed JSON lines, one file per UTC day, and
+    delete files older than `keep_days` (0 keeps everything)."""
 
-    def __init__(self, directory: str | Path) -> None:
+    def __init__(self, directory: str | Path, keep_days: int = 0) -> None:
         self.dir = Path(directory)
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.keep_days = keep_days
         self._day = ""
         self._fh = None
+        self._flushed = 0.0
 
     def write(self, ev: dict) -> None:
         day = datetime.fromtimestamp(ev["ts"], timezone.utc).strftime("%Y%m%d")
         if day != self._day:
             self.close()
             self._day = day
-            self._fh = (self.dir / f"events-{day}.jsonl").open("a", encoding="utf-8")
+            self._fh = gzip.open(self.dir / f"events-{day}.jsonl.gz", "at", encoding="utf-8")
+            self._prune()
         self._fh.write(json.dumps(ev, separators=(",", ":")) + "\n")
+        if ev["ts"] - self._flushed > 30:      # keep the file readable if we are killed
+            self._flushed = ev["ts"]
+            self._fh.flush()
+
+    def _prune(self) -> None:
+        if self.keep_days <= 0:
+            return
+        cutoff = time.time() - self.keep_days * 86400
+        for path in self.dir.glob("events-*.jsonl*"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                pass
 
     def close(self) -> None:
         if self._fh:
@@ -76,8 +96,12 @@ class Recorder:
 
 def read_events(paths: list[str | Path]) -> Iterator[dict]:
     for path in sorted(Path(p) for p in paths):
-        with path.open(encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    yield json.loads(line)
+        opener = gzip.open if path.suffix == ".gz" else open
+        with opener(path, "rt", encoding="utf-8") as fh:
+            try:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        yield json.loads(line)
+            except (EOFError, json.JSONDecodeError):
+                pass   # a file cut short by a crash or restart: use what is there

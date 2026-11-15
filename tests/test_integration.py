@@ -82,7 +82,7 @@ def test_recording_replays_to_identical_result(tmp_path):
         rec.write(ev)
         live.on_event(ev)
     rec.close()
-    files = sorted((tmp_path / "rec").glob("events-*.jsonl"))
+    files = sorted((tmp_path / "rec").glob("events-*.jsonl.gz"))
     assert files
     replay = Engine(CFG, PaperBroker(CFG.paper_latency_s), log=lambda _m: None)
     for ev in read_events(files):
@@ -101,7 +101,7 @@ def test_series_from_recordings_fills_small_gaps_only(tmp_path):
         rec.write({"t": "px", "ts": pts + 0.3, "src": "chainlink", "p": p, "pts": float(pts)})
     rec.write({"t": "px", "ts": T0 + 2.0, "src": "spot", "p": 999.0})
     rec.close()
-    got = series_from_recordings([str(f) for f in tmp_path.glob("*.jsonl")])
+    got = series_from_recordings([str(f) for f in tmp_path.glob("*.jsonl.gz")])
     assert got == [(T0, 100.0), (T0 + 1, 101.0), (T0 + 2, 101.0), (T0 + 3, 101.0),
                    (T0 + 4, 102.0), (T0 + 60, 103.0)]
 
@@ -181,6 +181,12 @@ def test_window_event_from_sdk_event():
     win = window_event(_fake_event(T0, metadata={"priceToBeat": 70123.5}), T0, CFG)
     assert (win["up"], win["down"], win["end"]) == ("111", "222", T0 + 300)
     assert (win["fee_rate"], win["fee_exp"], win["strike"]) == (0.07, 1.0, 70123.5)
+    assert win["taker_delay_s"] == 0.0
+    ev = _fake_event(T0)
+    ev.markets[0].trading.taker_delay_ms = 250
+    assert window_event(ev, T0, CFG)["taker_delay_s"] == 0.25
+    ev.markets[0].trading.seconds_delay = 3
+    assert window_event(ev, T0, CFG)["taker_delay_s"] == 3.0
     assert "strike" not in window_event(_fake_event(T0), T0, CFG)
     ev = _fake_event(T0)
     ev.markets[0].trading.fee_schedule = None        # not reported -> assume default, not zero
@@ -286,3 +292,71 @@ def test_live_broker_halts_when_outcome_unknown(tmp_path):
                           making_amount="17", taking_amount="9.69")   # price > 1
     (fill,), _, stop2 = _live(bad, tmp_path, BUY)
     assert "IMPLAUSIBLE" in fill.note and stop2.exists()
+
+
+def test_recorder_survives_truncation_and_prunes_old_files(tmp_path):
+    import os
+    import time as _time
+
+    old = tmp_path / "events-20200101.jsonl.gz"
+    old.write_bytes(b"x")
+    os.utime(old, (_time.time() - 30 * 86400,) * 2)
+    rec = Recorder(tmp_path, keep_days=14)
+    for i in range(200):
+        rec.write({"t": "px", "ts": T0 + i, "src": "chainlink", "p": 100.0 + i, "pts": T0 + i})
+    rec.close()
+    assert not old.exists()
+    (path,) = tmp_path.glob("*.gz")
+    assert len(list(read_events([path]))) == 200
+    data = path.read_bytes()
+    path.write_bytes(data[: len(data) // 2])               # killed mid-write
+    assert 0 < len(list(read_events([path]))) < 200
+
+
+def test_stream_silence_is_treated_as_a_failure():
+    from btc5m.polymarket_io import FeedStalled, _events
+
+    class Handle:
+        def __init__(self, items):
+            self.items = list(items)
+
+        async def __anext__(self):
+            if not self.items:
+                await asyncio.sleep(60)
+            item = self.items.pop(0)
+            if item is StopAsyncIteration:
+                raise StopAsyncIteration
+            return item
+
+    async def collect(items):
+        return [x async for x in _events(Handle(items), 0.05)]
+
+    assert asyncio.run(collect([1, 2, StopAsyncIteration])) == [1, 2]
+    with pytest.raises(FeedStalled):
+        asyncio.run(collect([1, 2]))
+
+
+def test_report_and_dashboard_from_logs(tmp_path):
+    from btc5m import analysis
+    from btc5m.dashboard import page
+
+    assert "No windows logged yet" in page(tmp_path / "empty", "paper")
+    eng = Engine(CFG, PaperBroker(CFG.paper_latency_s), Journal(tmp_path / "paper"),
+                 log=lambda _m: None)
+    for ev in synth_events(series(hours=2.0), CFG, mm_lag_s=4, mm_noise=0.02):
+        eng.on_event(ev)
+    windows, trades = analysis.load(tmp_path / "paper")
+    s = analysis.summary(windows)
+    assert s["windows_traded"] == eng.summary()["windows_traded"] > 0
+    assert s["total_pnl"] == pytest.approx(eng.summary()["total_pnl"], abs=0.05)
+    d = analysis.detail(windows, trades)
+    assert d["buys"] == sum(b["buys"] for b in d["by_price"]) == sum(
+        b["buys"] for b in d["by_time_left"])
+    assert d["buys"] > 0 and analysis.equity(windows)[-1] == pytest.approx(s["total_pnl"], abs=0.05)
+    assert "by entry price" in analysis.render(tmp_path / "paper")
+
+    with (tmp_path / "paper" / "windows.csv").open("a", encoding="utf-8") as fh:
+        fh.write("2030-01-01T00:00:00.000Z,x,1,2,UP,0,0,0,0,0,200,<script>alert(1)</script>\n")
+    html = page(tmp_path / "paper", "paper")
+    assert "Profit / loss" in html and "<polyline" in html
+    assert "<script>" not in html and "&lt;script&gt;" in html

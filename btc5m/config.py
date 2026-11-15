@@ -13,6 +13,8 @@ WINDOW_S = 300  # Polymarket "Bitcoin Up or Down - 5 Minutes" window length
 class Config:
     # --- capital & sizing -------------------------------------------------
     bankroll: float = 200.0          # capital the bot is allowed to treat as its own (USD)
+    compound: bool = False           # False: size bets off the starting bankroll (or less after
+                                     # losses), so results are not inflated by reinvested wins
     kelly_fraction: float = 0.25     # fraction of full Kelly to stake
     max_trade_usd: float = 15.0      # hard cap per order, fees included
     max_window_usd: float = 30.0     # hard cap on total buys in one 5-minute window
@@ -72,7 +74,10 @@ class Config:
 
     # --- output -------------------------------------------------------------
     data_dir: str = "data"
-    record: bool = True
+    record: bool = True              # compact recording: prices plus a book snapshot per second
+    record_depth: int = 5            # price levels per side kept in each snapshot
+    record_keep_days: int = 14       # older recording files are deleted
+    feed_stall_s: float = 15.0       # resubscribe when a stream goes silent this long
     status_interval_s: float = 15.0
 
 

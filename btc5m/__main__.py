@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
 import glob
-import json
+import signal
 import sys
 from pathlib import Path
 
@@ -47,6 +46,11 @@ def cmd_run(args: argparse.Namespace, live: bool) -> int:
             f"  create a file named '{cfg.kill_file}' in this folder to block new entries."
         )
     holder: list = []
+
+    def stop(*_args: object) -> None:      # systemd stop: shut down like Ctrl+C
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop)
     try:
         asyncio.run(run(cfg, live=live, auth_prices=args.auth_prices, holder=holder))
     except KeyboardInterrupt:
@@ -123,29 +127,16 @@ def cmd_sim(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    path = Path(args.data_dir or Config().data_dir) / args.mode / "windows.csv"
-    if not path.exists():
-        print(f"nothing recorded yet at {path}")
-        return 2
-    with path.open(encoding="utf-8") as fh:
-        rows = list(csv.DictReader(fh))
-    traded = [r for r in rows if int(r["buys"]) > 0]
-    pnl = [float(r["pnl"]) for r in traded]
-    peak = equity = drawdown = 0.0
-    for x in pnl:
-        equity += x
-        peak = max(peak, equity)
-        drawdown = max(drawdown, peak - equity)
-    staked = sum(float(r["spent"]) for r in traded)
-    print(json.dumps({
-        "windows_seen": len(rows), "windows_traded": len(traded),
-        "win_rate": round(sum(x > 0 for x in pnl) / len(pnl), 4) if pnl else None,
-        "total_pnl": round(sum(pnl), 2), "fees_paid": round(sum(float(r["fees"]) for r in traded), 2),
-        "staked": round(staked, 2),
-        "return_on_stake": round(sum(pnl) / staked, 4) if staked else None,
-        "max_drawdown": round(drawdown, 2),
-        "outcome_mismatches": sum("MISMATCH" in r["note"] for r in rows),
-    }, indent=2))
+    from .analysis import render
+
+    print(render(Path(args.data_dir or Config().data_dir) / args.mode))
+    return 0
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    from .dashboard import serve
+
+    serve(Path(args.data_dir or Config().data_dir) / args.mode, args.mode, args.host, args.port)
     return 0
 
 
@@ -194,7 +185,13 @@ def main(argv: list[str] | None = None) -> int:
     si.add_argument("-v", "--verbose", action="store_true")
 
     rp = sub.add_parser("report", help="summarise logged results")
-    rp.add_argument("--mode", choices=["paper", "live"], default="paper")
+    rp.add_argument("--mode", default="paper",
+                    help="which log folder under the data dir (paper, live, or an archived one)")
+
+    da = sub.add_parser("dashboard", help="serve a read-only results page")
+    da.add_argument("--mode", default="paper")
+    da.add_argument("--host", default="127.0.0.1")
+    da.add_argument("--port", type=int, default=8501)
 
     args = ap.parse_args(argv)
     try:
@@ -203,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "live":
             return cmd_run(args, live=True)
         return {"backtest": cmd_backtest, "fetch": cmd_fetch, "calibrate": cmd_calibrate,
-                "sim": cmd_sim, "report": cmd_report}[args.cmd](args)
+                "sim": cmd_sim, "report": cmd_report, "dashboard": cmd_dashboard}[args.cmd](args)
     except ValueError as exc:
         print(f"error: {exc}")
         return 2

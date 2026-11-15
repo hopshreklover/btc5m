@@ -6,8 +6,8 @@ what lets the exact same engine run live, on paper and over a recording.
 
 Events are plain dicts (so they serialise to JSON lines unchanged):
   {"t": "px",    "ts", "src": "chainlink" | "spot", "p", "pts"}   price tick
-  {"t": "win",   "ts", "start", "end", "slug", "up", "down",
-                 "fee_rate", "fee_exp", "min_size", "strike"?}     market found
+  {"t": "win",   "ts", "start", "end", "slug", "up", "down", "fee_rate",
+                 "fee_exp", "min_size", "taker_delay_s"?, "strike"?} market found
   {"t": "book",  "ts", "tok", "bids": [[p, s]...], "asks": [...]}  full book
   {"t": "delta", "ts", "tok", "side": "BUY" | "SELL", "p", "s"}    one level
   {"t": "resolved", "ts", "tok"}                                   winning token
@@ -37,6 +37,7 @@ class Window:
     fee_rate: float
     fee_exp: float
     min_size: float
+    taker_delay_s: float = 0.0
     strike: float | None = None
     strike_note: str = ""
     final: float | None = None
@@ -128,6 +129,7 @@ class Engine:
             fee_rate=float(ev.get("fee_rate", self.cfg.default_fee_rate)),
             fee_exp=float(ev.get("fee_exp", self.cfg.default_fee_exponent)),
             min_size=float(ev.get("min_size", 5.0)),
+            taker_delay_s=float(ev.get("taker_delay_s", 0.0)),
         )
         if ev.get("strike"):
             w.strike, w.strike_note = float(ev["strike"]), "from market data"
@@ -167,7 +169,9 @@ class Engine:
     # ------------------------------------------------------------ housekeeping
     def _view(self, start: int) -> WindowView | None:
         w = self.windows.get(start)
-        return WindowView(w.end, w.books, w.fee_rate, w.fee_exp) if w else None
+        if w is None:
+            return None
+        return WindowView(w.end, w.books, w.fee_rate, w.fee_exp, w.taker_delay_s)
 
     def _housekeeping(self) -> None:
         for fill in self.broker.poll(self.now, self._view):
@@ -252,6 +256,13 @@ class Engine:
             self.journal.window(res)
 
     # ------------------------------------------------------------------ trading
+    def sizing_bankroll(self) -> float:
+        """Capital that bet sizes are based on. Without compounding, wins are banked
+        rather than reinvested; losses still shrink it."""
+        if self.cfg.compound:
+            return self.risk.bankroll
+        return min(self.risk.bankroll, self.cfg.bankroll)
+
     def price_now(self) -> float | None:
         c = self.cfg
         if (
@@ -299,6 +310,7 @@ class Engine:
         tau = w.end - self.now
         # A delayed oracle feed means the price is already old when it arrives.
         age = self.skew if (spot == self.cl and self.skew) else 0.0
+        age = max(age, 0.0) + w.taker_delay_s   # the exchange also makes takers wait
         fair = fair_value(c, spot, w.strike, tau, self.vol.sigma, price_age_s=age)
         self.last_fair = fair
         block = self.risk.blocked(self.now)
@@ -311,7 +323,7 @@ class Engine:
         order = decide(
             c, window=w.start, now=self.now, fair=fair, books=w.books, tokens=w.tokens,
             held=w.held, fee_rate=w.fee_rate, fee_exp=w.fee_exp, min_size=w.min_size,
-            bankroll=self.risk.bankroll, window_budget_left=c.max_window_usd - w.spent,
+            bankroll=self.sizing_bankroll(), window_budget_left=c.max_window_usd - w.spent,
             allow_entry=block is None,
         )
         if order is None:
@@ -319,7 +331,7 @@ class Engine:
             return
         w.last_order_ts = self.now
         self.idle_reason = "order sent"
-        self.broker.submit(order)
+        self.broker.submit(order, self._view(w.start))
 
     # ------------------------------------------------------------------- status
     def _status(self) -> None:
@@ -343,6 +355,23 @@ class Engine:
             f"| Up {q(UP)} Down {q(DOWN)} | {held} | bank {self.risk.bankroll:.2f} "
             f"| {self.idle_reason}"
         )
+
+    def book_snapshots(self, depth: int) -> list[dict]:
+        """Top `depth` levels of each live book, as replayable `book` events."""
+        out = []
+        for w in self.windows.values():
+            if not (w.start - 5 <= self.now < w.end):
+                continue
+            for side in SIDES:
+                book = w.books[side]
+                if not book.bids and not book.asks:
+                    continue
+                out.append({
+                    "t": "book", "ts": round(self.now, 3), "tok": w.tokens[side],
+                    "bids": [list(x) for x in book.bids_sorted()[:depth]],
+                    "asks": [list(x) for x in book.asks_sorted()[:depth]],
+                })
+        return out
 
     def summary(self) -> dict:
         r = self.risk

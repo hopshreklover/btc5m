@@ -180,29 +180,62 @@ def test_paper_broker_latency_limit_and_fees():
     books[UP].apply("SELL", 0.60, 100, ts=0)
     view = lambda _s: WindowView(START + 300, books, 0.07, 1.0)  # noqa: E731
     br = PaperBroker(latency_s=0.5)
-    br.submit(_order())
+    br.submit(_order(), view(START))
     assert br.busy and br.poll(100.4, view) == []
     (f,) = br.poll(100.5, view)
     assert not br.busy
     assert f.shares == 8.0 and f.price == pytest.approx(0.57)     # 0.60 is past the limit
     assert f.fee == pytest.approx(8 * fee_per_share(0.57, 0.07, 1))
     assert 0.57 not in books[UP].asks                              # liquidity is gone
-    br.submit(_order(ts=101.0))
+    br.submit(_order(ts=101.0), view(START))
     (f,) = br.poll(102.0, view)
-    assert f.shares == 0 and f.note == "price moved away"
+    assert f.shares == 0 and f.note == "quotes gone before fill"
+
+
+def test_paper_broker_only_fills_size_that_stayed_put():
+    def setup(delay=0.0):
+        books = _books(0.55, 0.57, size=50.0)
+        view = lambda _s: WindowView(START + 300, books, 0.07, 1.0, delay)  # noqa: E731
+        br = PaperBroker(latency_s=0.5)
+        br.submit(_order(usd=100.0, limit=0.58), view(START))
+        return books, view, br
+
+    books, view, br = setup()                 # quote pulled, then put back: gone for us
+    books[UP].apply("SELL", 0.57, 0, ts=100.1)
+    assert br.poll(100.2, view) == []
+    books[UP].apply("SELL", 0.57, 50, ts=100.3)
+    (f,) = br.poll(100.5, view)
+    assert f.shares == 0
+
+    books, view, br = setup()                 # quote shrinks: only the remainder fills
+    books[UP].apply("SELL", 0.57, 12, ts=100.1)
+    br.poll(100.2, view)
+    books[UP].apply("SELL", 0.57, 40, ts=100.3)
+    (f,) = br.poll(100.5, view)
+    assert f.shares == 12.0
+
+    books, view, br = setup()                 # size that appears later does not count
+    books[UP].apply("SELL", 0.56, 500, ts=100.1)
+    (f,) = br.poll(100.5, view)
+    assert f.shares == 50.0 and f.price == pytest.approx(0.57)
+
+    books, view, br = setup(delay=2.0)        # exchange taker delay is added to the wait
+    assert br.poll(102.4, view) == []
+    (f,) = br.poll(102.5, view)
+    assert f.shares == 50.0
 
 
 def test_paper_broker_budget_and_sell_and_expiry():
     books = _books(0.55, 0.57, size=1000.0)
     view = lambda _s: WindowView(START + 300, books, 0.07, 1.0)  # noqa: E731
     br = PaperBroker(latency_s=0.0)
-    br.submit(_order(usd=10.0))
+    br.submit(_order(usd=10.0), view(START))
     (f,) = br.poll(100.0, view)
     assert f.notional + f.fee <= 10.0 and f.notional + f.fee > 9.9
-    br.submit(_order("SELL", usd=0.0, shares=12.0, limit=0.55))
+    br.submit(_order("SELL", usd=0.0, shares=12.0, limit=0.55), view(START))
     (f,) = br.poll(100.0, view)
     assert f.shares == 12.0 and f.price == pytest.approx(0.55)
-    br.submit(_order(ts=START + 299.9))
+    br.submit(_order(ts=START + 299.9), view(START))
     (f,) = br.poll(START + 300.0, lambda _s: WindowView(START + 300, books, 0.07, 1.0))
     assert f.shares == 0 and "closed" in f.note
 
@@ -351,3 +384,28 @@ def test_config_validation(tmp_path):
     p.write_text("bankroll = 500\nmin_edge = 0.05\n")
     cfg = load_config(str(p), min_edge=None)
     assert cfg.bankroll == 500 and cfg.min_edge == 0.05
+
+
+def test_flat_staking_does_not_reinvest_wins():
+    eng = Engine(CFG, PaperBroker(0.5), log=quiet)
+    eng.risk.bankroll = 900.0
+    assert eng.sizing_bankroll() == CFG.bankroll           # wins are banked
+    eng.risk.bankroll = 120.0
+    assert eng.sizing_bankroll() == 120.0                  # losses still shrink bets
+    eng = Engine(replace(CFG, compound=True), PaperBroker(0.5), log=quiet)
+    eng.risk.bankroll = 900.0
+    assert eng.sizing_bankroll() == 900.0
+
+
+def test_book_snapshots_are_compact_and_replayable():
+    eng = Engine(CFG, PaperBroker(0.5), log=quiet)
+    eng.on_event(_win(START, START - 20))
+    asks = [[round(0.50 + i / 100, 2), 10.0] for i in range(12)]
+    bids = [[round(0.49 - i / 100, 2), 10.0] for i in range(12)]
+    eng.on_event({"t": "book", "ts": START + 1.0, "tok": "u", "bids": bids, "asks": asks})
+    (snap,) = eng.book_snapshots(3)
+    assert snap["tok"] == "u" and snap["t"] == "book"
+    assert snap["bids"] == [[0.49, 10.0], [0.48, 10.0], [0.47, 10.0]]
+    assert snap["asks"] == [[0.5, 10.0], [0.51, 10.0], [0.52, 10.0]]
+    eng.on_event({"t": "clock", "ts": START + 301.0})
+    assert eng.book_snapshots(3) == []                     # nothing for a finished window
