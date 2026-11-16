@@ -42,6 +42,7 @@ python -m venv .venv
 | `python -m btc5m paper` | Trade the live markets with pretend money. Logs to `data/paper/`; records prices plus one book snapshot per second to `data/recordings/` (compressed, 14 days kept). |
 | `python -m btc5m report` | Summarise logged results, then break the buys down by entry price and by time left: what the bot predicted versus how often it actually won. `--mode NAME` reads another log folder. |
 | `python -m btc5m dashboard --host 0.0.0.0 --port 8501` | Serve the same results as a read-only web page (refreshes every minute). Defaults to localhost only. |
+| `python -m btc5m history --days 7` | Replay the bot over real history: every real trade and the official winner of each past market, with the bot's price feed delayed by 0, 1 and 2 seconds. Downloads public data (resumable) into `data/history/`; results land in `data/history-lagN/` for `report --mode history-lagN`. Prices, sizes and winners are real; that the bot would have reached each quote first is an assumption. |
 | `python -m btc5m backtest "data/recordings/*.jsonl"` | Replay recordings through the same engine, e.g. with different settings. |
 | `python -m btc5m fetch --hours 24` | Download recent BTC-USD prices from Coinbase (public, no account). |
 | `python -m btc5m calibrate` | Score the pricing model against those prices, or against the bot's own recorded oracle prices with `--recordings "data/recordings/*.jsonl"`. |
@@ -155,8 +156,9 @@ btc5m/
   journal.py        CSV logs and event recording
   analysis.py       where the profit or loss came from
   dashboard.py      read-only results page
+  history.py        replay over real past trades and official results
   coinbase.py       price download
   calibrate.py      model scoring
   sim.py            synthetic market for offline runs
-tests/              43 tests, no network needed
+tests/              46 tests, no network needed
 ```

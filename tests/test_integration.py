@@ -360,3 +360,106 @@ def test_report_and_dashboard_from_logs(tmp_path):
     html = page(tmp_path / "paper", "paper")
     assert "Profit / loss" in html and "<polyline" in html
     assert "<script>" not in html and "&lt;script&gt;" in html
+
+
+# ------------------------------------------------------------ real-history replay
+def _hist_windows(ser, n, size=100.0, ask=510, bid=490):
+    px = dict(ser)
+    out = []
+    for i in range(n):
+        s = T0 + 300 * i
+        out.append({
+            "start": s, "slug": f"h-{s}", "up": f"U{s}", "down": f"D{s}",
+            "winner": "UP" if px[s + 300] >= px[s] else "DOWN",
+            "strike": px[s], "final": px[s + 300], "fee_rate": 0.07, "fee_exp": 1.0,
+            "min_size": 5.0, "taker_delay_s": 0.0, "volume": 0.0,
+            "prints": [[sec, d, ask if d else bid, size] for sec in range(0, 300, 3)
+                       for d in (0, 1)],
+        })
+    return out
+
+
+def test_history_parsing_of_real_payload_shapes():
+    from btc5m.history import Prices, add_print, kline_rows, parse_market
+
+    payload = [{
+        "slug": "btc-updown-5m-1", "eventMetadata": {"priceToBeat": 64785.14, "finalPrice": 64781.06},
+        "markets": [{
+            "conditionId": "0xabc", "outcomes": '["Up", "Down"]', "outcomePrices": '["0", "1"]',
+            "clobTokenIds": '["111", "222"]', "closed": True, "orderMinSize": 5,
+            "feeSchedule": {"exponent": 1, "rate": 0.07}, "volumeNum": 1234.5,
+        }],
+    }]
+    win = parse_market(payload, T0, CFG)
+    assert (win["up"], win["down"], win["winner"]) == ("111", "222", "DOWN")
+    assert (win["strike"], win["final"], win["fee_rate"]) == (64785.14, 64781.06, 0.07)
+    payload[0]["markets"][0]["outcomePrices"] = '["0.5", "0.5"]'
+    assert parse_market(payload, T0, CFG) is None            # no winner yet
+    assert parse_market([], T0, CFG) is None
+
+    agg = {}
+    add_print(agg, win, T0 + 7.0, "111", "BUY", 0.55, 10)     # Up ask at 0.55
+    add_print(agg, win, T0 + 7.9, "222", "SELL", 0.45, 5)     # same thing seen from Down
+    add_print(agg, win, T0 + 7.0, "222", "BUY", 0.47, 8)      # Down ask 0.47 = Up bid 0.53
+    add_print(agg, win, T0 + 7.0, "111", "SELL", 0.53, 2)
+    add_print(agg, win, T0 - 1.0, "111", "BUY", 0.55, 10)     # before the market: ignored
+    add_print(agg, win, T0 + 7.0, "999", "BUY", 0.55, 10)     # another market: ignored
+    assert agg == {(7, 1, 550): 15.0, (7, 0, 530): 10.0}
+
+    assert kline_rows([[1000_000, "1", "2", "0", "7.5", "0"]]) == [(1001, 7.5)]
+    pr = Prices.from_pairs([(10, 1.0), (11, 2.0), (14, 5.0), (13, 9.0)])
+    assert [pr.at(t) for t in (9, 10, 12, 13, 14, 15)] == [None, 1.0, 2.0, 2.0, 5.0, None]
+
+
+def test_history_replay_uses_real_prices_sizes_and_winners():
+    from btc5m.history import Prices, market_events, price_events, proxy_check, run_replay
+
+    ser = series(hours=2.5)
+    prices = Prices.from_pairs(ser)
+    wins = _hist_windows(ser, 20)
+    lo, hi = T0 - 600, T0 + 300 * 20 + 10
+
+    ts = [ev["ts"] for ev, _ in market_events(wins, CFG)]
+    assert ts == sorted(ts)
+    assert all(ev["ts"] >= ev["pts"] for ev, _ in price_events(prices, lo, lo + 50, 0.0, -2))
+    index = [{"start": w["start"], "winner": w["winner"], "strike": w["strike"],
+              "final": w["final"]} for w in wins]
+    (check,) = proxy_check(index, prices, shifts=(0,))
+    assert check["median_abs_error"] == 0 and check["winner_agreement"] == 1.0
+
+    # A market that always quotes 0.51 either way is easy money: the bot must find it,
+    eng = run_replay(CFG, wins, prices, lo, hi, feed_lag_s=0.0)
+    s = eng.summary()
+    assert s["windows_traded"] > 5 and s["total_pnl"] > 0 and s["missed_orders"] == 0
+    by_start = {w["start"]: w for w in wins}
+    for r in eng.results:
+        assert r["winner"] == by_start[r["start"]]["winner"] and "MISMATCH" not in r["note"]
+        assert r["spent"] <= CFG.max_window_usd + 0.01
+    buys = [f for f in eng.fills if f.order.action == "BUY"]
+    assert buys and all(abs(f.price - 0.51) < 1e-9 for f in buys)   # only at traded prices
+    # ... but cannot take more than really traded,
+    small = run_replay(CFG, _hist_windows(ser, 20, size=6.0), prices, lo, hi, feed_lag_s=0.0)
+    assert small.fills and all(f.shares <= 6.0 + 1e-9 for f in small.fills)
+    # and a slower feed never sees the future.
+    slow = run_replay(CFG, wins, prices, lo, hi, feed_lag_s=2.0)
+    assert slow.skew == pytest.approx(2.0)
+    assert slow.summary()["windows_traded"] > 0
+
+
+def test_history_store_round_trip(tmp_path):
+    import gzip
+    import json
+
+    from btc5m.history import read_index, read_windows
+
+    ser = series(hours=1.0)
+    wins = _hist_windows(ser, 4)
+    with gzip.open(tmp_path / "windows-20270115.jsonl.gz", "at", encoding="utf-8") as fh:
+        for w in wins[:3]:
+            fh.write(json.dumps(w) + "\n")
+    with gzip.open(tmp_path / "windows-20270115.jsonl.gz", "at", encoding="utf-8") as fh:
+        fh.write(json.dumps(wins[3]) + "\n" + json.dumps(wins[1]) + "\n{broken")
+    got = list(read_windows(tmp_path, T0, T0 + 10_000))
+    assert [w["start"] for w in got] == [w["start"] for w in wins]
+    assert [w["start"] for w in read_windows(tmp_path, T0 + 300, T0 + 900)] == [T0 + 300, T0 + 600]
+    assert read_index(tmp_path) == {}

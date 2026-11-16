@@ -133,6 +133,24 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_history(args: argparse.Namespace) -> int:
+    from .history import run
+
+    cfg = _cfg(args)
+    lags = [float(x) for x in args.lags.split(",") if x.strip()]
+    results = run(cfg, args.days, lags, fetch=not args.no_fetch, replay=not args.fetch_only)
+    if results:
+        print("\n--- real-history replay, by feed lag ---")
+        print("  lag  traded   win%      P&L  w/o best 3   staked  return  drawdown  mismatches")
+        for r in results:
+            print(f"  {r['feed_lag_s']:>3g} {r.get('windows_traded', 0):>7} "
+                  f"{(r.get('win_rate') or 0) * 100:>6.1f} {r.get('total_pnl', 0):>8.2f} "
+                  f"{r.get('pnl_without_best_3') or 0:>11.2f} {r.get('staked', 0):>8.2f} "
+                  f"{(r.get('return_on_stake') or 0) * 100:>6.1f}% {r.get('max_drawdown', 0):>9.2f} "
+                  f"{r.get('outcome_mismatches', 0):>11}")
+    return 0
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     from .dashboard import serve
 
@@ -188,6 +206,15 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--mode", default="paper",
                     help="which log folder under the data dir (paper, live, or an archived one)")
 
+    hi = sub.add_parser("history", help="replay the bot over real past trades and results")
+    hi.add_argument("--days", type=float, default=7.0)
+    hi.add_argument("--lags", default="0,1,2",
+                    help="price-feed delays to test, in whole seconds (default 0,1,2)")
+    hi.add_argument("--no-fetch", action="store_true", help="use what is already downloaded")
+    hi.add_argument("--fetch-only", action="store_true", help="download, do not replay")
+    hi.add_argument("--bankroll", type=float)
+    hi.add_argument("--min-edge", type=float)
+
     da = sub.add_parser("dashboard", help="serve a read-only results page")
     da.add_argument("--mode", default="paper")
     da.add_argument("--host", default="127.0.0.1")
@@ -200,7 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "live":
             return cmd_run(args, live=True)
         return {"backtest": cmd_backtest, "fetch": cmd_fetch, "calibrate": cmd_calibrate,
-                "sim": cmd_sim, "report": cmd_report, "dashboard": cmd_dashboard}[args.cmd](args)
+                "sim": cmd_sim, "report": cmd_report, "dashboard": cmd_dashboard,
+                "history": cmd_history}[args.cmd](args)
     except ValueError as exc:
         print(f"error: {exc}")
         return 2
