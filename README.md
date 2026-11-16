@@ -4,7 +4,9 @@ A trading bot for Polymarket's "Bitcoin Up or Down – 5 Minutes" markets.
 
 Each market pays $1 per share on **Up** if the Chainlink BTC/USD price at the
 end of a 5-minute window is at or above the price at its start, otherwise on
-**Down**. The bot prices that bet from the live oracle price, compares it with
+**Down**. Both prices are 60-second averages (the market's rules name a
+60-second TWAP stream), not the price at the exact second; `twap_s` sets this.
+The bot prices that bet from the live oracle price, compares it with
 the order book, and only trades when the book is offering a price that is still
 good after fees and after assuming the market moves against it while the order
 is in flight.
@@ -42,7 +44,7 @@ python -m venv .venv
 | `python -m btc5m paper` | Trade the live markets with pretend money. Logs to `data/paper/`; records prices plus one book snapshot per second to `data/recordings/` (compressed, 14 days kept). |
 | `python -m btc5m report` | Summarise logged results, then break the buys down by entry price and by time left: what the bot predicted versus how often it actually won. `--mode NAME` reads another log folder. |
 | `python -m btc5m dashboard --host 0.0.0.0 --port 8501` | Serve the same results as a read-only web page (refreshes every minute). Defaults to localhost only. |
-| `python -m btc5m history --days 7` | Replay the bot over real history: every real trade and the official winner of each past market, with the bot's price feed delayed by 0, 1 and 2 seconds. Downloads public data (resumable) into `data/history/`; results land in `data/history-lagN/` for `report --mode history-lagN`. Prices, sizes and winners are real; that the bot would have reached each quote first is an assumption. |
+| `python -m btc5m history --days 7` | Replay the bot over real history: every real trade and the official winner of each past market, with the bot's price feed delayed by 0.4, 1.4 and 2.4 seconds (the live feed measured 1.4), once for each settlement rule (`instant` and `avg60`). Downloads public data (resumable) into `data/history/`; results land in `data/history-RULE-lagN/` for `report --mode history-avg60-lag1.4`. Prices, sizes and winners are real; that the bot would have reached each quote first is an assumption. It also re-settles the paper and live logs with the official winners. |
 | `python -m btc5m backtest "data/recordings/*.jsonl"` | Replay recordings through the same engine, e.g. with different settings. |
 | `python -m btc5m fetch --hours 24` | Download recent BTC-USD prices from Coinbase (public, no account). |
 | `python -m btc5m calibrate` | Score the pricing model against those prices, or against the bot's own recorded oracle prices with `--recordings "data/recordings/*.jsonl"`. |
@@ -55,9 +57,12 @@ Settings: copy `config.example.toml` to `config.toml` and pass
 
 ## How it decides
 
-1. **Strike.** The oracle tick stamped exactly at the window start (or the
-   market's own "price to beat" when it is published). If the bot joins
-   mid-window and never saw that tick, it sits the window out rather than guess.
+1. **Strike.** The average of the oracle ticks over the 60 seconds up to the
+   window start (or the market's own "price to beat" when it is published). If
+   the bot joined too late to see most of that minute, it sits the window out
+   rather than guess. The final price is the same average at the window end,
+   and the pricing accounts for part of that average already being fixed
+   during the last minute.
 2. **Fair value.** `P(up) = F(ln(price / strike) / (vol × √seconds_left))`,
    with `vol` from a blend of fast and slow moving averages of squared returns
    and `F` a fat-tailed (Student-t) distribution.
