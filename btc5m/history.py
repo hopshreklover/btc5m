@@ -14,9 +14,18 @@ What this can and cannot show. Each real trade proves that amount was
 available at that price at that moment, so prices and sizes are real. What is
 assumed: that the quote was already resting when the bot decided (0.6 s
 earlier), and that the bot would have got there ahead of whoever really took
-it. The honest way to read the result is by `feed lag`: how old the bot's price
-information is allowed to be. An edge that survives a 2-3 second handicap is
-a pricing edge; one that only exists at 0 is a speed race the bot may not win.
+it. The honest way to read the result is by `feed lag`: how late the bot's
+price feed is. An edge that survives a slow feed is a pricing edge; one that
+only exists with a fast feed is a speed race the bot may not win.
+
+Timing matters more than anything else here, and two things were measured
+against a recording of the live feeds rather than assumed:
+  - published trade times run about 2.3 s behind the order book (they look
+    like on-chain confirmation times), so each trade is placed that much
+    earlier than its stamp. Ignoring this lets the bot see prices from after
+    the trade and manufactures large fake profits;
+  - the live oracle tick stamped t matches the stand-in exchange price at
+    t-1, and arrives about 1.4 s after its own stamp.
 """
 
 from __future__ import annotations
@@ -379,12 +388,14 @@ def _books(win: dict, prints: list, ts: float) -> tuple[dict, dict]:
             {"t": "book", "ts": ts, "tok": win["down"], "bids": dn_bids, "asks": dn_asks})
 
 
-def market_events(windows: Iterable[dict], cfg: Config) -> Iterator[tuple[dict, bool]]:
+def market_events(windows: Iterable[dict], cfg: Config,
+                  stamp_delay_s: float = 0.0) -> Iterator[tuple[dict, bool]]:
     """(event, may_decide) pairs for the stored markets, in time order.
 
-    Trades stamped second t are treated as happening at t+0.5. Their prices
-    appear to the bot one decision-to-fill wait earlier, it gets a single
-    decision, the fill is checked at t+0.5 and the quotes then disappear.
+    Trades stamped second t are treated as happening at t+0.5-stamp_delay_s.
+    Their prices appear to the bot one decision-to-fill wait earlier, it gets a
+    single decision, the fill is checked at the trade time and the quotes then
+    disappear.
     """
     pending: dict | None = None            # previous window's result announcement
     for win in windows:
@@ -406,10 +417,10 @@ def market_events(windows: Iterable[dict], cfg: Config) -> Iterator[tuple[dict, 
         for p in win["prints"]:
             by_sec.setdefault(p[0], []).append(p)
         for sec in sorted(by_sec):
-            if sec < 1:
-                continue                   # would overlap the previous market's result
-            fill_at = start + sec + 0.5
+            fill_at = start + sec + 0.5 - stamp_delay_s
             seen_at = fill_at - wait - 0.01
+            if seen_at <= start + 0.01:
+                continue                   # would overlap the previous market's result
             up, down = _books(win, by_sec[sec], seen_at)
             yield up, False
             yield down, True
@@ -443,11 +454,12 @@ class _ReplayEngine(Engine):
 
 
 def run_replay(cfg: Config, windows: Iterable[dict], prices: Prices, lo: int, hi: int, *,
-               feed_lag_s: float, shift_s: int = 0, journal: Journal | None = None,
-               log: Log = lambda _m: None) -> Engine:
+               feed_lag_s: float, shift_s: int = 0, stamp_delay_s: float = 0.0,
+               journal: Journal | None = None, log: Log = lambda _m: None) -> Engine:
     engine = _ReplayEngine(cfg, PaperBroker(cfg.paper_latency_s), journal, log=log)
     stream = heapq.merge(
-        price_events(prices, lo, hi, feed_lag_s, shift_s), market_events(windows, cfg),
+        price_events(prices, lo, hi, feed_lag_s, shift_s),
+        market_events(windows, cfg, stamp_delay_s),
         key=lambda pair: pair[0]["ts"],
     )
     for ev, may_decide in stream:
@@ -458,9 +470,11 @@ def run_replay(cfg: Config, windows: Iterable[dict], prices: Prices, lo: int, hi
 
 # ---------------------------------------------------------------------- CLI
 def run(cfg: Config, days: float, lags: list[float], *, fetch: bool = True,
-        replay: bool = True, shift: int = -1, log: Log = print) -> list[dict]:
+        replay: bool = True, shift: int = -1, stamp_delay: float = 2.3,
+        log: Log = print) -> list[dict]:
     """`shift`: the live oracle tick stamped t matches the stand-in series at
-    t+shift (measured against a recording of the live feed: -1)."""
+    t+shift. `stamp_delay`: how far published trade times run behind the real
+    trade. Both defaults were measured against a recording of the live feeds."""
     from dataclasses import replace
 
     base = Path(cfg.data_dir)
@@ -499,23 +513,25 @@ def run(cfg: Config, days: float, lags: list[float], *, fetch: bool = True,
     # second, and one that uses the averaged price the rules name.
     rules = [("instant", 0.0), (f"avg{cfg.twap_s or 60.0:g}", cfg.twap_s or 60.0)]
     for rule, span in rules:
-        quiet = replace(cfg, status_interval_s=0.0, kill_file="", twap_s=span)
         for lag in lags:
+            quiet = replace(cfg, status_interval_s=0.0, kill_file="", twap_s=span,
+                            max_clock_skew_s=max(cfg.max_clock_skew_s, lag + 1.0))
             mode = f"history-{rule}-lag{lag:g}"
             out = base / mode
             for name in ("trades.csv", "windows.csv"):
                 (out / name).unlink(missing_ok=True)
             t = time.time()
             run_replay(quiet, read_windows(store, lo, hi), prices, warmup, hi + 10,
-                       feed_lag_s=lag, shift_s=shift, journal=Journal(out))
+                       feed_lag_s=lag, shift_s=shift, stamp_delay_s=stamp_delay,
+                       journal=Journal(out))
             rows, trades = analysis.load(out)
             s = analysis.summary(rows) if rows else {}
             d = analysis.detail(rows, trades) if rows else {}
             s.update(rule=rule, feed_lag_s=lag, mode=mode, buys=d.get("buys", 0),
                      missed_orders=d.get("missed_orders", 0))
             results.append(s)
-            log(f"\n=== settlement rule '{rule}', feed lag {lag:g}s: price information about "
-                f"{lag + 1.5 - shift:g}s old when the real trade happened "
-                f"({time.time() - t:.0f}s to run) ===")
+            log(f"\n=== settlement rule '{rule}', feed lag {lag:g}s: exchange price about "
+                f"{lag + cfg.paper_latency_s + 0.5 - shift:.1f}s old when the real trade "
+                f"happened ({time.time() - t:.0f}s to run) ===")
             log(analysis.render(out))
     return results

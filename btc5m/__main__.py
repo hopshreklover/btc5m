@@ -138,7 +138,8 @@ def cmd_history(args: argparse.Namespace) -> int:
 
     cfg = _cfg(args)
     lags = [float(x) for x in args.lags.split(",") if x.strip()]
-    results = run(cfg, args.days, lags, fetch=not args.no_fetch, replay=not args.fetch_only)
+    results = run(cfg, args.days, lags, fetch=not args.no_fetch, replay=not args.fetch_only,
+                  stamp_delay=args.stamp_delay)
     if results:
         print("\n--- real-history replay, by settlement rule and feed lag ---")
         print("  rule     lag  traded   win%      P&L  w/o best 3   staked  return  drawdown  "
@@ -209,8 +210,12 @@ def main(argv: list[str] | None = None) -> int:
 
     hi = sub.add_parser("history", help="replay the bot over real past trades and results")
     hi.add_argument("--days", type=float, default=7.0)
-    hi.add_argument("--lags", default="0,1,2",
-                    help="price-feed delays to test, in whole seconds (default 0,1,2)")
+    hi.add_argument("--lags", default="0.4,1.4,2.4",
+                    help="price-feed delays to test, in seconds; the live feed measured 1.4 "
+                         "(default 0.4,1.4,2.4)")
+    hi.add_argument("--stamp-delay", type=float, default=2.3,
+                    help="seconds that published trade times run behind the real trade "
+                         "(measured: 2.3)")
     hi.add_argument("--no-fetch", action="store_true", help="use what is already downloaded")
     hi.add_argument("--fetch-only", action="store_true", help="download, do not replay")
     hi.add_argument("--bankroll", type=float)

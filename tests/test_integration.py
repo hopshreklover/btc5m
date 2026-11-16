@@ -422,6 +422,12 @@ def test_history_replay_uses_real_prices_sizes_and_winners(tmp_path):
 
     ts = [ev["ts"] for ev, _ in market_events(wins, CFG)]
     assert ts == sorted(ts)
+    # Published trade times run late: with a delay the same trades are placed earlier,
+    # still in order, and never before their market opens.
+    early = [ev for ev, _ in market_events(wins[:2], CFG, stamp_delay_s=2.3)]
+    assert [e["ts"] for e in early] == sorted(e["ts"] for e in early)
+    clocks = [e["ts"] for e in early if e["t"] == "clock"]
+    assert clocks[0] == pytest.approx(T0 + 3 + 0.5 - 2.3) and min(clocks) > T0
     assert all(ev["ts"] >= ev["pts"] for ev, _ in price_events(prices, lo, lo + 50, 0.0, -2))
     index = [{"start": w["start"], "winner": w["winner"], "strike": w["strike"],
               "final": w["final"]} for w in wins]
