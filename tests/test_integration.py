@@ -411,8 +411,8 @@ def test_history_parsing_of_real_payload_shapes():
     assert [pr.at(t) for t in (9, 10, 12, 13, 14, 15)] == [None, 1.0, 2.0, 2.0, 5.0, None]
 
 
-def test_history_replay_uses_real_prices_sizes_and_winners():
-    from btc5m.history import Prices, market_events, price_events, proxy_check, run_replay
+def test_history_replay_uses_real_prices_sizes_and_winners(tmp_path):
+    from btc5m.history import Prices, market_events, price_events, rule_check, run_replay
 
     ser = series(hours=2.5)
     prices = Prices.from_pairs(ser)
@@ -424,8 +424,9 @@ def test_history_replay_uses_real_prices_sizes_and_winners():
     assert all(ev["ts"] >= ev["pts"] for ev, _ in price_events(prices, lo, lo + 50, 0.0, -2))
     index = [{"start": w["start"], "winner": w["winner"], "strike": w["strike"],
               "final": w["final"]} for w in wins]
-    (check,) = proxy_check(index, prices, shifts=(0,))
-    assert check["median_abs_error"] == 0 and check["winner_agreement"] == 1.0
+    exact, averaged = rule_check(index, prices)       # these fake markets settle on the exact second
+    assert exact["median_abs_error"] == 0 and exact["winner_agreement"] == 1.0
+    assert averaged["lookback_s"] == 60 and averaged["median_abs_error"] > 0
 
     # A market that always quotes 0.51 either way is easy money: the bot must find it,
     eng = run_replay(CFG, wins, prices, lo, hi, feed_lag_s=0.0)
@@ -437,6 +438,17 @@ def test_history_replay_uses_real_prices_sizes_and_winners():
         assert r["spent"] <= CFG.max_window_usd + 0.01
     buys = [f for f in eng.fills if f.order.action == "BUY"]
     assert buys and all(abs(f.price - 0.51) < 1e-9 for f in buys)   # only at traded prices
+    # Re-settling a log with the official winners: same winners, same money;
+    # flipped winners, different money.
+    from btc5m.history import rescore
+    run_replay(CFG, wins, prices, lo, hi, feed_lag_s=0.0, journal=Journal(tmp_path / "h"))
+    same = rescore(tmp_path / "h", {w["start"]: w for w in wins})
+    assert same["windows"] == s["windows_traded"] == same["same_winner"]
+    assert same["official_pnl"] == pytest.approx(same["logged_pnl"], abs=0.05)
+    assert same["logged_pnl"] == pytest.approx(s["total_pnl"], abs=0.05)
+    flip = {w["start"]: {"winner": "DOWN" if w["winner"] == "UP" else "UP"} for w in wins}
+    wrong = rescore(tmp_path / "h", flip)
+    assert wrong["same_winner"] == 0 and wrong["official_pnl"] < 0 < wrong["logged_pnl"]
     # ... but cannot take more than really traded,
     small = run_replay(CFG, _hist_windows(ser, 20, size=6.0), prices, lo, hi, feed_lag_s=0.0)
     assert small.fills and all(f.shares <= 6.0 + 1e-9 for f in small.fills)

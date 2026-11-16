@@ -294,29 +294,74 @@ def read_windows(directory: str | Path, lo: int, hi: int) -> Iterator[dict]:
 
 
 # ------------------------------------------------------------------- replay
-def proxy_check(index: Iterable[dict], prices: Prices, shifts=(-3, -2, -1, 0)) -> list[dict]:
-    """How well the stand-in price series reproduces the official results, for
-    each candidate time shift (official price at t ~ stand-in at t + shift)."""
+def rule_check(index: Iterable[dict], prices: Prices, shift_s: int = 0,
+               lookbacks=(1, 60)) -> list[dict]:
+    """Which reading of the rules reproduces the official results?
+
+    For each lookback L the stand-in "official price" at a boundary is the
+    average of the stand-in series over the L seconds up to it (L=1 is the
+    price at that instant, which is what the engine assumes; these markets'
+    rules name a 60-second average). Reports how far the implied move over each
+    market is from the official one, and how often it names the same winner.
+    """
     rows = [r for r in index if r.get("strike") not in (None, "", "None")
             and r.get("final") not in (None, "", "None")]
+
+    def avg(boundary: int, n: int) -> float | None:
+        vals = [prices.at(boundary + shift_s - k) for k in range(n)]
+        return None if any(v is None for v in vals) else sum(vals) / n
+
     out = []
-    for shift in shifts:
+    for look in lookbacks:
         errs, agree, n = [], 0, 0
         for r in rows:
             s = int(r["start"])
-            a, b = prices.at(s + shift), prices.at(s + WINDOW_S + shift)
+            a, b = avg(s, look), avg(s + WINDOW_S, look)
             if a is None or b is None:
                 continue
-            real = float(r["final"]) - float(r["strike"])
-            errs.append(abs(real - (b - a)))
+            errs.append(abs(float(r["final"]) - float(r["strike"]) - (b - a)))
             agree += (UP if b >= a else DOWN) == r["winner"]
             n += 1
         if n:
             errs.sort()
-            out.append({"shift_s": shift, "windows": n, "median_abs_error": round(errs[n // 2], 2),
+            out.append({"lookback_s": look, "windows": n,
+                        "median_abs_error": round(errs[n // 2], 2),
                         "p90_abs_error": round(errs[int(n * 0.9)], 2),
                         "winner_agreement": round(agree / n, 4)})
     return out
+
+
+def rescore(directory: str | Path, index: dict[int, dict]) -> dict | None:
+    """Re-settle a paper or live log with the official winners: what the logged
+    trades were really worth, as opposed to what the bot's own prices said."""
+    windows, trades = analysis.load(directory)
+    pos: dict[int, dict] = {}
+    for t in trades:
+        shares = float(t["shares"])
+        if shares <= 0:
+            continue
+        p = pos.setdefault(int(analysis._ts(t["window"])), {"cash": 0.0, UP: 0.0, DOWN: 0.0})
+        if t["action"] == "BUY":
+            p["cash"] -= float(t["notional"]) + float(t["fee"])
+            p[t["side"]] += shares
+        else:
+            p["cash"] += float(t["notional"]) - float(t["fee"])
+            p[t["side"]] = max(p[t["side"]] - shares, 0.0)
+    n = same = 0
+    logged = real = 0.0
+    for w in windows:
+        s = int(analysis._ts(w["start"]))
+        if int(w["buys"]) <= 0 or s not in index or s not in pos:
+            continue
+        official = index[s]["winner"]
+        n += 1
+        same += w["winner"] == official
+        logged += float(w["pnl"])
+        real += pos[s]["cash"] + pos[s][official]
+    if not n:
+        return None
+    return {"windows": n, "same_winner": same, "logged_pnl": round(logged, 2),
+            "official_pnl": round(real, 2)}
 
 
 def _books(win: dict, prints: list, ts: float) -> tuple[dict, dict]:
@@ -413,7 +458,9 @@ def run_replay(cfg: Config, windows: Iterable[dict], prices: Prices, lo: int, hi
 
 # ---------------------------------------------------------------------- CLI
 def run(cfg: Config, days: float, lags: list[float], *, fetch: bool = True,
-        replay: bool = True, log: Log = print) -> list[dict]:
+        replay: bool = True, shift: int = -1, log: Log = print) -> list[dict]:
+    """`shift`: the live oracle tick stamped t matches the stand-in series at
+    t+shift (measured against a recording of the live feed: -1)."""
     from dataclasses import replace
 
     base = Path(cfg.data_dir)
@@ -432,14 +479,19 @@ def run(cfg: Config, days: float, lags: list[float], *, fetch: bool = True,
     if not index or not prices.values:
         log("nothing downloaded for this period")
         return []
-    checks = proxy_check(index, prices)
-    log("\nstand-in price series versus official results (move over each market):")
-    for c in checks:
-        log(f"  shift {c['shift_s']:+d}s: median error ${c['median_abs_error']}, 9 in 10 within "
-            f"${c['p90_abs_error']}, same winner {c['winner_agreement'] * 100:.1f}% "
+    log("\nwhich rule reproduces the official results (stand-in prices, move over each market):")
+    for c in rule_check(index, prices, shift):
+        name = ("price at the exact second (what the bot assumes)" if c["lookback_s"] == 1
+                else f"{c['lookback_s']}-second average")
+        log(f"  {name}: median error ${c['median_abs_error']}, 9 in 10 within "
+            f"${c['p90_abs_error']}, same winner as official {c['winner_agreement'] * 100:.1f}% "
             f"of {c['windows']}")
-    shift = min(checks, key=lambda c: c["median_abs_error"])["shift_s"] if checks else 0
-    log(f"using shift {shift:+d}s")
+    for mode in ("paper", "paper-v1", "live"):
+        r = rescore(base / mode, read_index(store))
+        if r:
+            log(f"logged results in {mode}/ re-settled with official winners: {r['windows']} "
+                f"traded markets, bot's winner matched the official one in {r['same_winner']}; "
+                f"logged P&L {r['logged_pnl']:+.2f}, with official winners {r['official_pnl']:+.2f}")
     ups = sum(r["winner"] == UP for r in index)
     log(f"official winners: UP {ups}, DOWN {len(index) - ups}")
     results = []
