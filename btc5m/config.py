@@ -46,6 +46,10 @@ class Config:
     trade_cooldown_s: float = 2.0    # wait for the book to refresh after a fill
     decide_interval_s: float = 0.1
     strike_grace_s: float = 2.0      # accept a strike tick at most this late
+    twap_s: float = 60.0             # the market settles on the average oracle price over
+                                     # this many seconds up to the start and up to the end
+                                     # (its rules name a 60-second TWAP); 0 = the price at
+                                     # that exact second
     settle_timeout_s: float = 45.0
 
     # --- staleness guards -------------------------------------------------

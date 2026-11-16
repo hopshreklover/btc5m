@@ -114,7 +114,7 @@ def cmd_sim(args: argparse.Namespace) -> int:
     from .coinbase import load_series
     from .sim import run_sim
 
-    cfg = _cfg(args, status_interval_s=0.0)
+    cfg = _cfg(args, status_interval_s=0.0, twap_s=0.0)   # the made-up market is instant-price
     series = load_series(args.prices)
     print("SIMULATION with a synthetic market maker. Profit here is NOT evidence of "
           "profit on Polymarket.")
@@ -140,10 +140,11 @@ def cmd_history(args: argparse.Namespace) -> int:
     lags = [float(x) for x in args.lags.split(",") if x.strip()]
     results = run(cfg, args.days, lags, fetch=not args.no_fetch, replay=not args.fetch_only)
     if results:
-        print("\n--- real-history replay, by feed lag ---")
-        print("  lag  traded   win%      P&L  w/o best 3   staked  return  drawdown  mismatches")
+        print("\n--- real-history replay, by settlement rule and feed lag ---")
+        print("  rule     lag  traded   win%      P&L  w/o best 3   staked  return  drawdown  "
+              "mismatches")
         for r in results:
-            print(f"  {r['feed_lag_s']:>3g} {r.get('windows_traded', 0):>7} "
+            print(f"  {r['rule']:<8} {r['feed_lag_s']:>3g} {r.get('windows_traded', 0):>7} "
                   f"{(r.get('win_rate') or 0) * 100:>6.1f} {r.get('total_pnl', 0):>8.2f} "
                   f"{r.get('pnl_without_best_3') or 0:>11.2f} {r.get('staked', 0):>8.2f} "
                   f"{(r.get('return_on_stake') or 0) * 100:>6.1f}% {r.get('max_drawdown', 0):>9.2f} "

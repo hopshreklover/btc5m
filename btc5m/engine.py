@@ -16,6 +16,7 @@ Events are plain dicts (so they serialise to JSON lines unchanged):
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -81,6 +82,8 @@ class Engine:
         self._by_token: dict[str, tuple[Window, str]] = {}
         self.cl: float | None = None      # last oracle price
         self.cl_ts = 0.0                  # when it arrived
+        self.cl_pts = 0.0                 # the oracle's own timestamp for it
+        self._ticks: deque[tuple[float, float]] = deque()   # recent (oracle time, price)
         self.skew: float | None = None    # arrival time - oracle timestamp (EWMA)
         self.spot: float | None = None
         self.spot_ts = 0.0
@@ -146,7 +149,11 @@ class Engine:
             return
         pts = float(ev.get("pts", ts))
         self.vol.update(pts, p)
-        self.cl, self.cl_ts = p, ts
+        self.cl, self.cl_ts, self.cl_pts = p, ts, pts
+        keep = self.cfg.twap_s + 10.0
+        self._ticks.append((pts, p))
+        while self._ticks and self._ticks[0][0] < pts - keep:
+            self._ticks.popleft()
         lag = ts - pts
         self.skew = lag if self.skew is None else 0.9 * self.skew + 0.1 * lag
         if self.spot is not None and ts - self.spot_ts <= self.cfg.max_spot_age_s:
@@ -157,14 +164,55 @@ class Engine:
         grace = self.cfg.strike_grace_s
         for w in self.windows.values():
             if w.strike is None and not w.strike_note and pts >= w.start:
-                if pts - w.start <= grace:
-                    w.strike = p
+                mark = self._boundary_price(w.start, p)
+                if pts - w.start <= grace and mark is not None:
+                    w.strike = mark
                     w.strike_note = "exact" if pts == w.start else f"+{pts - w.start:.1f}s"
                 else:
-                    w.strike_note = "missed"   # joined mid-window: do not guess
+                    w.strike_note = "missed"   # joined too late to know it: do not guess
             if w.final is None and pts >= w.end:
-                w.final = p
-                w.final_note = "exact" if pts == w.end else f"+{pts - w.end:.1f}s"
+                mark = self._boundary_price(w.end, p)
+                w.final = p if mark is None else mark
+                w.final_note = ("approx" if mark is None else
+                                "exact" if pts == w.end else f"+{pts - w.end:.1f}s")
+
+    def _boundary_price(self, boundary: float, tick: float) -> float | None:
+        """The settlement price at a window boundary: the tick itself, or the
+        average of the ticks over the `twap_s` seconds up to the boundary. None
+        if not enough of that stretch was seen."""
+        span = self.cfg.twap_s
+        if span <= 0:
+            return tick
+        vals = [p for t, p in self._ticks if boundary - span < t <= boundary]
+        first = next((t for t, _ in self._ticks if t > boundary - span), None)
+        if len(vals) < span / 4 or first is None or first > boundary - span + 5.0:
+            return None
+        return sum(vals) / len(vals)
+
+    def settle_terms(self, w: Window, spot: float) -> tuple[float, float]:
+        """(strike, seconds) for the pricing model, which thinks in terms of one
+        price at one instant.
+
+        With an averaged settlement price the thing being predicted is the mean
+        over the last `twap_s` seconds. Before that stretch starts, its
+        uncertainty is that of a price twap_s*2/3 seconds earlier than the end.
+        Inside it, part of the average is already fixed: what is left to decide
+        is whether the rest averages above the level that would lift the whole
+        mean to the strike, and an average over r seconds is as uncertain as a
+        price r/3 seconds ahead.
+        """
+        span = self.cfg.twap_s
+        if span <= 0:
+            return w.strike, w.end - self.now
+        left = w.end - self.cl_pts                      # in oracle time
+        if left >= span:
+            return w.strike, left - span * 2.0 / 3.0
+        if left <= 0:
+            return w.strike, 0.0
+        seen = [p for t, p in self._ticks if t > w.end - span]
+        fixed = sum(seen) / len(seen) if seen else spot
+        need = (span * w.strike - (span - left) * fixed) / left
+        return min(max(need, spot * 0.9), spot * 1.1), left / 3.0
 
     # ------------------------------------------------------------ housekeeping
     def _view(self, start: int) -> WindowView | None:
@@ -311,7 +359,8 @@ class Engine:
         # A delayed oracle feed means the price is already old when it arrives.
         age = self.skew if (spot == self.cl and self.skew) else 0.0
         age = max(age, 0.0) + w.taker_delay_s   # the exchange also makes takers wait
-        fair = fair_value(c, spot, w.strike, tau, self.vol.sigma, price_age_s=age)
+        strike, horizon = self.settle_terms(w, spot)
+        fair = fair_value(c, spot, strike, horizon, self.vol.sigma, price_age_s=age)
         self.last_fair = fair
         block = self.risk.blocked(self.now)
         if tau > (w.end - w.start) - c.no_trade_first_s or tau < c.no_trade_last_s:

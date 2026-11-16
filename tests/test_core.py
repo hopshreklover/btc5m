@@ -12,7 +12,8 @@ from btc5m.model import VolEstimator, norm_cdf, prob_up, t_cdf, unit_cdf
 from btc5m.risk import Risk
 from btc5m.strategy import DOWN, UP, Fair, Order, decide, fair_value, plan_buy
 
-CFG = Config(status_interval_s=0.0, kill_file="")
+# Most tests use the simpler instant-price settlement; the averaged rule has its own.
+CFG = Config(status_interval_s=0.0, kill_file="", twap_s=0.0)
 START = 1_800_000_000 - 1_800_000_000 % 300
 
 
@@ -409,3 +410,56 @@ def test_book_snapshots_are_compact_and_replayable():
     assert snap["asks"] == [[0.5, 10.0], [0.51, 10.0], [0.52, 10.0]]
     eng.on_event({"t": "clock", "ts": START + 301.0})
     assert eng.book_snapshots(3) == []                     # nothing for a finished window
+
+
+def _tick(eng, pts, p, lag=0.0):
+    eng.on_event({"t": "px", "ts": pts + lag, "src": "chainlink", "p": p, "pts": float(pts)})
+
+
+def test_averaged_settlement_strike_and_final():
+    cfg = replace(CFG, twap_s=60.0)
+    eng = Engine(cfg, PaperBroker(0.5), log=quiet)
+    eng.on_event(_win(START, START - 100))
+    for t in range(START - 90, START + 301):
+        _tick(eng, t, 70000.0 + (t - START))            # rises $1 a second
+    w = eng.windows.get(START) or next(iter(eng.windows.values()))
+    res = eng.results[0] if eng.results else None
+    # mean of the 60 ticks ending at the boundary: boundary price minus 29.5
+    strike = res["strike"] if res else w.strike
+    final = res["final"] if res else w.final
+    assert strike == pytest.approx(70000.0 - 29.5)
+    assert final == pytest.approx(70300.0 - 29.5)
+
+    late = Engine(cfg, PaperBroker(0.5), log=quiet)     # joined 20 s before the start:
+    late.on_event(_win(START, START - 30))              # most of the average was not seen
+    for t in range(START - 20, START + 5):
+        _tick(late, t, 70000.0)
+    assert late.windows[START].strike is None and late.windows[START].strike_note == "missed"
+
+
+def test_averaged_settlement_pricing_terms():
+    cfg = replace(CFG, twap_s=60.0)
+    eng = Engine(cfg, PaperBroker(0.5), log=quiet)
+    eng.on_event(_win(START, START - 100))
+    for t in range(START - 90, START + 101):
+        _tick(eng, t, 70000.0)
+    w = eng.windows[START]
+    assert w.strike == pytest.approx(70000.0)
+    # 200 s left: the average is as uncertain as a price 160 s ahead
+    assert eng.settle_terms(w, 70000.0) == (w.strike, pytest.approx(160.0))
+    # Now jump $50 above the strike and hold it through the first half of the last minute.
+    for t in range(START + 101, START + 271):
+        _tick(eng, t, 70050.0)
+    need, horizon = eng.settle_terms(w, 70050.0)
+    assert horizon == pytest.approx(10.0)               # 30 s left, averaged
+    # half the average is locked $50 high, so the rest may average $50 low and still win
+    assert need == pytest.approx(69950.0, abs=2.0)
+    p_avg = fair_value(cfg, 70050.0, need, horizon, 5e-5).p_up
+    p_point = fair_value(cfg, 70050.0, w.strike, 30.0, 5e-5).p_up
+    assert p_avg > p_point > 0.5
+    # Instant-price rule is untouched.
+    plain = Engine(CFG, PaperBroker(0.5), log=quiet)
+    plain.on_event(_win(START, START - 100))
+    _tick(plain, START, 70000.0)
+    _tick(plain, START + 100, 70010.0)
+    assert plain.settle_terms(plain.windows[START], 70010.0) == (70000.0, 200.0)

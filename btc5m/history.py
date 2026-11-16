@@ -495,22 +495,27 @@ def run(cfg: Config, days: float, lags: list[float], *, fetch: bool = True,
     ups = sum(r["winner"] == UP for r in index)
     log(f"official winners: UP {ups}, DOWN {len(index) - ups}")
     results = []
-    quiet = replace(cfg, status_interval_s=0.0, kill_file="")
-    for lag in lags:
-        mode = f"history-lag{lag:g}"
-        out = base / mode
-        for name in ("trades.csv", "windows.csv"):
-            (out / name).unlink(missing_ok=True)
-        t = time.time()
-        run_replay(quiet, read_windows(store, lo, hi), prices, warmup, hi + 10,
-                   feed_lag_s=lag, shift_s=shift, journal=Journal(out))
-        rows, trades = analysis.load(out)
-        s = analysis.summary(rows) if rows else {}
-        d = analysis.detail(rows, trades) if rows else {}
-        s.update(feed_lag_s=lag, mode=mode, buys=d.get("buys", 0),
-                 missed_orders=d.get("missed_orders", 0))
-        results.append(s)
-        log(f"\n=== feed lag {lag:g}s: price information about {lag + 1.5 - shift:g}s old when "
-            f"the real trade happened ({time.time() - t:.0f}s to run) ===")
-        log(analysis.render(out))
+    # Two bots: one that believes the market settles on the price at the exact
+    # second, and one that uses the averaged price the rules name.
+    rules = [("instant", 0.0), (f"avg{cfg.twap_s or 60.0:g}", cfg.twap_s or 60.0)]
+    for rule, span in rules:
+        quiet = replace(cfg, status_interval_s=0.0, kill_file="", twap_s=span)
+        for lag in lags:
+            mode = f"history-{rule}-lag{lag:g}"
+            out = base / mode
+            for name in ("trades.csv", "windows.csv"):
+                (out / name).unlink(missing_ok=True)
+            t = time.time()
+            run_replay(quiet, read_windows(store, lo, hi), prices, warmup, hi + 10,
+                       feed_lag_s=lag, shift_s=shift, journal=Journal(out))
+            rows, trades = analysis.load(out)
+            s = analysis.summary(rows) if rows else {}
+            d = analysis.detail(rows, trades) if rows else {}
+            s.update(rule=rule, feed_lag_s=lag, mode=mode, buys=d.get("buys", 0),
+                     missed_orders=d.get("missed_orders", 0))
+            results.append(s)
+            log(f"\n=== settlement rule '{rule}', feed lag {lag:g}s: price information about "
+                f"{lag + 1.5 - shift:g}s old when the real trade happened "
+                f"({time.time() - t:.0f}s to run) ===")
+            log(analysis.render(out))
     return results

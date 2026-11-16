@@ -19,7 +19,8 @@ from btc5m.journal import Journal, Recorder, read_events
 from btc5m.sim import run_sim, synth_events
 from btc5m.strategy import UP, Order
 
-CFG = Config(status_interval_s=0.0, kill_file="")
+# Most tests use the simpler instant-price settlement; the averaged rule has its own.
+CFG = Config(status_interval_s=0.0, kill_file="", twap_s=0.0)
 T0 = 1_800_000_000 - 1_800_000_000 % 300
 
 
