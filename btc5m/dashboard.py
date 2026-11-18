@@ -45,6 +45,15 @@ def _money(x: float | None, sign: bool = True) -> str:
     return f'<span class="{cls}">{text}</span>' if sign else text
 
 
+def _p3(x) -> str:
+    """A probability, or a dash when the strategy did not use one (resting bids)."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return "–"
+    return "–" if v != v else f"{v:.3f}"
+
+
 def _pct(x: float | None) -> str:
     return "–" if x is None else f"{x * 100:.1f}%"
 
@@ -87,7 +96,7 @@ def _buckets(rows: list[dict], unit: str) -> str:
         hi = b["hi"] if unit else min(b["hi"], 1.0)
         out.append([
             f"{b['lo']:g}–{hi:g}{unit}", str(b["buys"]), f"{b['staked']:,.2f}",
-            f"{b['avg_price']:.3f}", f"{b['predicted']:.3f}", f"{b['won']:.3f}",
+            f"{b['avg_price']:.3f}", _p3(b['predicted']), f"{b['won']:.3f}",
             _money(b["hold_pnl"]), _pct(b["return"]),
         ])
     return _table(["Bucket", "Buys", "Staked", "Avg price", "Predicted", "Actually won",
@@ -157,7 +166,7 @@ def page(directory: str | Path, mode: str) -> str:
     ] for r in windows[-15:][::-1]]
     recent_t = [[
         escape(t["time"][5:19].replace("T", " ")), escape(t["action"]), escape(t["side"]),
-        f"{float(t['shares']):.2f}", f"{float(t['price']):.3f}", f"{float(t['p_used']):.3f}",
+        f"{float(t['shares']):.2f}", f"{float(t['price']):.3f}", _p3(t['p_used']),
         f"{float(t['edge']):+.3f}", escape(t["note"][:40]),
     ] for t in trades[-15:][::-1]]
     money = "Real money." if mode == "live" else "Pretend money: fills are simulated."
