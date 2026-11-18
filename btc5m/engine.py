@@ -409,7 +409,7 @@ class Engine:
             block = block or f"no strike ({w.strike_note or 'waiting'})"
         elif any(self.now - b.ts > self.cfg.max_book_age_s for b in w.books.values()):
             block = block or "order book stale"
-        elif w.spent + self.cfg.rest_usd > self.cfg.max_window_usd + 1e-9:
+        elif w.spent >= self.quoter.budget() - 0.5:
             block = block or "window budget used"
         self.idle_reason = self.quoter.update(w, self.now, block)
         if block:

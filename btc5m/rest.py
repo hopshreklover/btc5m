@@ -15,9 +15,11 @@ Rules (all in Config, `rest_*`):
   - between rest_from_s and rest_until_s into the market, when a side's best bid
     is within [rest_fav_min, rest_fav_max], keep a bid for rest_usd at that best
     bid (joining the queue), moving it when the best bid moves;
-  - one fill per market: once a side fills, the other side's bid is cancelled
-    (holding both at 0.80+ would lock in a loss); cancel everything at
-    rest_until_s;
+  - one side per market: once a side fills, the other side's bid is cancelled
+    (holding both at 0.80+ would lock in a loss);
+  - up to rest_max_fills orders of rest_usd per market (an order stays up until it
+    is completely filled; the next one goes up rest_refill_s after a fill), within
+    max_window_usd; cancel everything at rest_until_s;
   - orders take paper_latency_s to appear, move or disappear.
 
 Paper fills. A trade is a print in either token; a trade in the long shot at
@@ -52,7 +54,10 @@ class _Quote:
 @dataclass
 class _MarketState:
     quotes: dict[str, list[_Quote]] = field(default_factory=lambda: {UP: [], DOWN: []})
-    done: set[str] = field(default_factory=set)        # sides already filled
+    done: set[str] = field(default_factory=set)        # sides that have had a fill
+    side: str | None = None                            # the side this market is locked to
+    spent: float = 0.0                                 # money paid for fills so far
+    next_ok: float = 0.0                               # no new order before this time
     touch: list[tuple[str, float, float]] = field(default_factory=list)  # side, price, shares
 
 
@@ -67,10 +72,12 @@ class RestingQuoter:
         c = self.cfg
         st = self.state.setdefault(w.start, _MarketState())
         t = now - w.start
+        left = self.budget() - st.spent
         quoting = []
         for side in SIDES:
             want = None
-            if blocked is None and not st.done and c.rest_from_s <= t < c.rest_until_s:
+            if (blocked is None and st.side in (None, side) and left > 0.5
+                    and c.rest_from_s <= t < c.rest_until_s):
                 bid = w.books[side].best_bid()
                 ask = w.books[side].best_ask()
                 if (bid is not None and c.rest_fav_min <= bid <= c.rest_fav_max
@@ -85,13 +92,17 @@ class RestingQuoter:
                     self._cancel(st, side, now)
                 continue
             quoting.append(f"{side} {want:.2f}")
-            if current is None or abs(current - want) > 1e-9:
+            if (current is None or abs(current - want) > 1e-9) and now >= st.next_ok:
                 if pending:
                     self._cancel(st, side, now)
-                shares = round(c.rest_usd / want, 2)
+                shares = round(min(c.rest_usd, left) / want, 2)
                 if shares >= max(w.min_size, 5.0):
                     st.quotes[side].append(_Quote(want, shares, now + c.paper_latency_s))
         return ("resting bid " + ", ".join(quoting)) if quoting else "no favourite in band"
+
+    def budget(self) -> float:
+        c = self.cfg
+        return min(c.rest_usd * c.rest_max_fills, c.max_window_usd)
 
     def _cancel(self, st: _MarketState, side: str, now: float) -> None:
         """A cancel also takes paper_latency_s: until then the old order can still fill."""
@@ -111,8 +122,6 @@ class RestingQuoter:
             # the favourite's price for this trade
             px = price if side_traded == fav else round(1.0 - price, 4)
             for q in list(st.quotes[fav]):
-                if fav in st.done:
-                    break
                 if now < q.active_from or now >= q.cancel_at:
                     continue
                 if px < q.price - 1e-9:                    # swept through our level
@@ -120,12 +129,20 @@ class RestingQuoter:
                     if take <= 0:
                         continue
                     q.filled += take
+                    size -= take
+                    st.spent += take * q.price
                     fills.append(self._fill(w, fav, q.price, take, now))
-                    if q.filled >= q.shares - 1e-9 or q.filled >= 5.0:
-                        st.done.add(fav)
-                        st.quotes[fav] = []
+                    st.done.add(fav)
+                    if st.side is None:
+                        st.side = fav
                         other = DOWN if fav == UP else UP
                         self._cancel(st, other, now)   # still fillable until the cancel lands
+                    if q.filled >= q.shares - 1e-9:
+                        st.quotes[fav].remove(q)
+                        st.next_ok = now + self.cfg.rest_refill_s
+                    if st.spent >= self.budget() - 0.5:
+                        for s in SIDES:
+                            self._cancel(st, s, now)
                 elif abs(px - q.price) <= 1e-9:            # at our level: queue unknown
                     st.touch.append((fav, q.price, min(q.shares, size)))
         return fills

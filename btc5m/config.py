@@ -72,6 +72,8 @@ class Config:
     rest_from_s: float = 8.0         # seconds into the market
     rest_until_s: float = 240.0
     rest_usd: float = 10.0           # per resting order
+    rest_max_fills: int = 1          # completely filled orders allowed per market
+    rest_refill_s: float = 5.0       # wait after a fill before posting the next order
 
     # --- optional faster spot feed (Coinbase) ------------------------------
     spot_lead: bool = False
@@ -129,3 +131,4 @@ def validate(cfg: Config) -> None:
     need(0 < cfg.rest_fav_min <= cfg.rest_fav_max < 1, "need 0 < rest_fav_min <= rest_fav_max < 1")
     need(0 <= cfg.rest_from_s < cfg.rest_until_s <= WINDOW_S, "rest window must fit the market")
     need(0 < cfg.rest_usd <= cfg.max_window_usd, "rest_usd must be positive and <= max_window_usd")
+    need(cfg.rest_max_fills >= 1 and cfg.rest_refill_s >= 0, "rest_max_fills >= 1, rest_refill_s >= 0")

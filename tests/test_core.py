@@ -495,19 +495,39 @@ def test_rest_quotes_the_favourite_and_fills_only_on_a_sweep():
     assert eng.windows[START].buys == 0
     _trade(eng, START + 21.0, "u", 0.85)            # at our price: queue unknown, not booked
     assert eng.windows[START].buys == 0 and eng.quoter.state[START].touch
-    _trade(eng, START + 21.5, "d", 0.16)            # Down at 0.16 = Up at 0.84: swept through
+    _trade(eng, START + 21.5, "d", 0.16, s=5.0)     # Down at 0.16 = Up at 0.84: swept, 5 shares
+    _trade(eng, START + 21.6, "u", 0.84, s=50.0)    # the rest of the order fills too
     w = eng.windows[START]
-    assert w.buys == 1 and w.held[UP] == pytest.approx(round(REST.rest_usd / 0.85, 2))
+    assert w.buys == 2 and w.held[UP] == pytest.approx(round(REST.rest_usd / 0.85, 2))
     assert w.fees == 0                                               # makers pay no fee
-    _trade(eng, START + 22.0, "u", 0.80)            # one fill per market
-    assert eng.windows[START].buys == 1
+    _trade(eng, START + 22.0, "u", 0.80)            # budget of one order used up
+    assert eng.windows[START].buys == 2
     # the favourite flips: the bot must not now bid on Down as well
     eng.on_event({"t": "book", "ts": START + 23.0, "tok": "u", "bids": [[0.14, 99.0]], "asks": [[0.15, 99.0]]})
     eng.on_event({"t": "book", "ts": START + 23.0, "tok": "d", "bids": [[0.85, 99.0]], "asks": [[0.86, 99.0]]})
     eng.on_event({"t": "clock", "ts": START + 23.2})
     assert eng.quoter.state[START].quotes[DOWN] == []
     _trade(eng, START + 24.0, "d", 0.80)
-    assert eng.windows[START].buys == 1 and eng.windows[START].held[DOWN] == 0
+    assert eng.windows[START].buys == 2 and eng.windows[START].held[DOWN] == 0
+
+
+def test_rest_several_orders_per_market_same_side_only():
+    eng = Engine(replace(REST, rest_max_fills=3, rest_refill_s=2.0), PaperBroker(0.5), log=quiet)
+    eng.on_event(_win(START, START - 100))
+    for t in range(START - 90, START + 1):
+        _tick(eng, t, 70000.0)
+    filled = []
+    for k in range(6):                              # a fresh book and a sweep every 4 s
+        ts = START + 20.0 + 4 * k
+        eng.on_event({"t": "book", "ts": ts, "tok": "u", "bids": [[0.85, 99.0]], "asks": [[0.86, 99.0]]})
+        eng.on_event({"t": "book", "ts": ts, "tok": "d", "bids": [[0.14, 99.0]], "asks": [[0.15, 99.0]]})
+        eng.on_event({"t": "clock", "ts": ts + 0.15})
+        _trade(eng, ts + 1.0, "u", 0.84, s=100.0)
+        filled.append(eng.windows[START].held[UP])
+    w = eng.windows[START]
+    assert w.buys == 3 and w.held[DOWN] == 0
+    assert w.spent == pytest.approx(30.0, abs=0.1)   # three $10 orders, then the budget is used
+    assert filled[-1] == filled[-2]
 
 
 def test_rest_cancels_late_and_settles_with_touch_note():
