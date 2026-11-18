@@ -499,8 +499,15 @@ def test_rest_quotes_the_favourite_and_fills_only_on_a_sweep():
     w = eng.windows[START]
     assert w.buys == 1 and w.held[UP] == pytest.approx(round(REST.rest_usd / 0.85, 2))
     assert w.fees == 0                                               # makers pay no fee
-    _trade(eng, START + 22.0, "u", 0.80)            # one fill per side per market
+    _trade(eng, START + 22.0, "u", 0.80)            # one fill per market
     assert eng.windows[START].buys == 1
+    # the favourite flips: the bot must not now bid on Down as well
+    eng.on_event({"t": "book", "ts": START + 23.0, "tok": "u", "bids": [[0.14, 99.0]], "asks": [[0.15, 99.0]]})
+    eng.on_event({"t": "book", "ts": START + 23.0, "tok": "d", "bids": [[0.85, 99.0]], "asks": [[0.86, 99.0]]})
+    eng.on_event({"t": "clock", "ts": START + 23.2})
+    assert eng.quoter.state[START].quotes[DOWN] == []
+    _trade(eng, START + 24.0, "d", 0.80)
+    assert eng.windows[START].buys == 1 and eng.windows[START].held[DOWN] == 0
 
 
 def test_rest_cancels_late_and_settles_with_touch_note():

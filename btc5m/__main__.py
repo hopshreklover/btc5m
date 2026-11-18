@@ -153,6 +153,13 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    from .check import run_check
+
+    run_check(_cfg(args), args.days, fetch=not args.no_fetch)
+    return 0
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     from .dashboard import serve
 
@@ -221,6 +228,11 @@ def main(argv: list[str] | None = None) -> int:
     hi.add_argument("--bankroll", type=float)
     hi.add_argument("--min-edge", type=float)
 
+    ck = sub.add_parser("check", help="daily: replay the strategy and re-settle the paper "
+                                      "log against the latest real results")
+    ck.add_argument("--days", type=float, default=14.0)
+    ck.add_argument("--no-fetch", action="store_true", help="use what is already downloaded")
+
     da = sub.add_parser("dashboard", help="serve a read-only results page")
     da.add_argument("--mode", default="paper")
     da.add_argument("--host", default="127.0.0.1")
@@ -234,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_run(args, live=True)
         return {"backtest": cmd_backtest, "fetch": cmd_fetch, "calibrate": cmd_calibrate,
                 "sim": cmd_sim, "report": cmd_report, "dashboard": cmd_dashboard,
-                "history": cmd_history}[args.cmd](args)
+                "history": cmd_history, "check": cmd_check}[args.cmd](args)
     except ValueError as exc:
         print(f"error: {exc}")
         return 2

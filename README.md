@@ -45,6 +45,7 @@ python -m venv .venv
 | `python -m btc5m report` | Summarise logged results, then break the buys down by entry price and by time left: what the bot predicted versus how often it actually won. `--mode NAME` reads another log folder. |
 | `python -m btc5m dashboard --host 0.0.0.0 --port 8501` | Serve the same results as a read-only web page (refreshes every minute). Defaults to localhost only. |
 | `python -m btc5m history --days 7` | Replay the bot over real history: every real trade and the official winner of each past market, with the bot's price feed delayed by 0.4, 1.4 and 2.4 seconds (the live feed measured 1.4), once for each settlement rule (`instant` and `avg60`). Downloads public data (resumable) into `data/history/`; results land in `data/history-RULE-lagN/` for `report --mode history-avg60-lag1.4`. Prices, sizes and winners are real; that the bot would have reached each quote first is an assumption. It also re-settles the paper and live logs with the official winners. |
+| `python -m btc5m check --days 14` | Is it holding up? Downloads the latest markets (resumable), replays the configured strategy over the last 14 days of real trades and official winners, re-settles the paper log with the official winners, and writes `data/check.json`, which the dashboard shows day by day. Meant to run every few hours from a timer. |
 | `python -m btc5m backtest "data/recordings/*.jsonl"` | Replay recordings through the same engine, e.g. with different settings. |
 | `python -m btc5m fetch --hours 24` | Download recent BTC-USD prices from Coinbase (public, no account). |
 | `python -m btc5m calibrate` | Score the pricing model against those prices, or against the bot's own recorded oracle prices with `--recordings "data/recordings/*.jsonl"`. |
@@ -109,7 +110,8 @@ once, as a test.
 
 `strategy = "rest"` (paper only) keeps a bid on the favourite while its best bid
 is 0.80–0.90, from 8 s to 240 s into the market, $10 per order, one fill per
-side per market. That is the same as an offer on the long shot at 0.10–0.20.
+market (once a side fills, the other side's bid is cancelled: holding both at
+0.80+ would lock in a loss). That is the same as an offer on the long shot at 0.10–0.20.
 Makers pay no fee here. Paper fills are strict: a fill is booked only when the
 favourite trades below the bid, so the whole queue at that price was used up.
 Trades exactly at the bid are logged per market as `touch-only` with what they
@@ -117,8 +119,13 @@ would have made. Real-trade replay, per dollar staked:
 
 | Period | Strict fills | Generous fills (touches count) | Fills/hour |
 | --- | --- | --- | --- |
-| Oct 19 – Nov 9 (tuning) | +0.3% ± 0.6 | +1.0% ± 0.6 | 13 |
-| Nov 9 – 16 (held out) | +1.0% ± 0.9 | +1.7% ± 0.9 | 13 |
+| Oct 19 – Nov 9 (tuning) | +0.4%, +$206 ± $339 | +1.1% | 11.5 |
+| Nov 9 – 16 (first test) | +1.2%, +$243 ± $195 | +2.0% | 11.7 |
+| Nov 16 – 18 (fresh: 708 markets nothing was fitted to) | +1.9%, +$133 ± $114 | +3.0% | 11.8 |
+
+Dollar figures are for $10 per fill. Positive in all three periods; five weeks
+combined is about 1.4 standard errors above zero, so encouraging rather than
+proven. `python -m btc5m check` (below) keeps testing it on each new day.
 
 Small, and not yet proven: which of the two columns is closer to the truth
 depends on queue position, which trade data cannot show. Paper results land in
@@ -205,8 +212,9 @@ btc5m/
   dashboard.py      read-only results page
   history.py        replay over real past trades and official results
   rest.py           the resting-bid strategy and its paper fills
+  check.py          the recurring check against real results
   coinbase.py       price download
   calibrate.py      model scoring
   sim.py            synthetic market for offline runs
-tests/              52 tests, no network needed
+tests/              53 tests, no network needed
 ```

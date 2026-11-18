@@ -493,3 +493,44 @@ def test_history_books_are_never_crossed():
     up, dn = _books(win, prints, 1.0)
     assert min(a for a, _ in up["asks"]) == 0.52 and [b for b, _ in up["bids"]] == [0.5]
     assert all(b < min(a for a, _ in dn["asks"]) for b, _ in dn["bids"])
+
+
+def test_check_by_day_render_and_dashboard(tmp_path):
+    """The daily check: per-day figures, official re-settlement, pruning, page."""
+    import gzip
+    import json
+
+    from btc5m.check import by_day, prune, render
+    from btc5m.dashboard import page
+    from btc5m.history import Prices, run_replay
+
+    ser = series(hours=2.5)
+    prices = Prices.from_pairs(ser)
+    wins = _hist_windows(ser, 20)
+    rest = replace(CFG, strategy="rest")
+    run_replay(rest, wins, prices, T0 - 600, T0 + 6010, feed_lag_s=1.4, journal=Journal(tmp_path / "r"))
+    days = by_day(tmp_path / "r", {w["start"]: w for w in wins})
+    (day,) = days.values()
+    assert day["markets"] == 20
+    assert day["official_n"] == day["traded"] and day["wrong_winner"] == 0
+    assert day["official_pnl"] == pytest.approx(day["pnl"], abs=0.05)
+
+    res = {"generated": "x", "strategy": "rest", "from": "a", "to": "b", "markets": 20,
+           "days": [{"date": k, "replay": v, "paper": v} for k, v in days.items()]}
+    assert "holding up?" in render(res)
+    (tmp_path / "check.json").write_text(json.dumps(res), encoding="utf-8")
+    (tmp_path / "paper-rest").mkdir()
+    html = page(tmp_path / "paper-rest", "paper-rest")           # no paper results yet
+    assert "Holding up against real results" in html and "No windows logged yet" in html
+    import shutil
+    shutil.copytree(tmp_path / "r", tmp_path / "paper-rest", dirs_exist_ok=True)
+    html = page(tmp_path / "paper-rest", "paper-rest")
+    assert "Holding up against real results" in html and "Pretend money" in html
+
+    store = tmp_path / "store"
+    store.mkdir()
+    for name in ("windows-20200101.jsonl.gz", "windows-20300101.jsonl.gz"):
+        with gzip.open(store / name, "wt") as fh:
+            fh.write("{}" + chr(10))
+    prune(store, 1_800_000_000)                        # 2027-01-15
+    assert [p.name for p in store.glob("*.gz")] == ["windows-20300101.jsonl.gz"]

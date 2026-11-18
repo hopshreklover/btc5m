@@ -6,14 +6,18 @@ Why. Replaying four weeks of real trades, buying cheap long-shot shares
 the favourite at 1-q is the same thing as an offer on the long shot at q, so it
 sits on the other side of that flow. Makers pay no fee on these markets. On the
 three tuning weeks this made +0.3% (strict fills) to +1.0% (generous fills) per
-dollar; on the held-out week +1.0% to +1.7%; about 13 fills an hour. The
-uncertainty is in the fills, which trade data cannot settle.
+dollar; on the held-out week +1.0% to +1.7%; about 13 fills an hour. With one
+side per market (below), on 708 fresh markets nothing was fitted to (Nov 16-18):
++1.9% strict, +3.0% generous, about 12 fills an hour. The uncertainty is in the
+fills, which trade data cannot settle.
 
 Rules (all in Config, `rest_*`):
   - between rest_from_s and rest_until_s into the market, when a side's best bid
     is within [rest_fav_min, rest_fav_max], keep a bid for rest_usd at that best
     bid (joining the queue), moving it when the best bid moves;
-  - at most one fill per side per market; cancel everything at rest_until_s;
+  - one fill per market: once a side fills, the other side's bid is cancelled
+    (holding both at 0.80+ would lock in a loss); cancel everything at
+    rest_until_s;
   - orders take paper_latency_s to appear, move or disappear.
 
 Paper fills. A trade is a print in either token; a trade in the long shot at
@@ -66,7 +70,7 @@ class RestingQuoter:
         quoting = []
         for side in SIDES:
             want = None
-            if blocked is None and side not in st.done and c.rest_from_s <= t < c.rest_until_s:
+            if blocked is None and not st.done and c.rest_from_s <= t < c.rest_until_s:
                 bid = w.books[side].best_bid()
                 ask = w.books[side].best_ask()
                 if (bid is not None and c.rest_fav_min <= bid <= c.rest_fav_max
@@ -120,6 +124,8 @@ class RestingQuoter:
                     if q.filled >= q.shares - 1e-9 or q.filled >= 5.0:
                         st.done.add(fav)
                         st.quotes[fav] = []
+                        other = DOWN if fav == UP else UP
+                        self._cancel(st, other, now)   # still fillable until the cancel lands
                 elif abs(px - q.price) <= 1e-9:            # at our level: queue unknown
                     st.touch.append((fav, q.price, min(q.shares, size)))
         return fills

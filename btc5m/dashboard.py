@@ -94,6 +94,34 @@ def _buckets(rows: list[dict], unit: str) -> str:
                    "Hold P&L", "Return"], out)
 
 
+def _check_section(directory: Path) -> str:
+    """The daily 'holding up?' table written by `check`, if there is one."""
+    from . import check
+
+    res = check.load(directory.parent)
+    if not res or not res.get("days"):
+        return ""
+    rows, tot = [], [0, 0.0, 0.0, 0, 0.0, 0.0]
+    for d in res["days"][::-1]:
+        r, p = d.get("replay") or {}, d.get("paper") or {}
+        rows.append([escape(str(d["date"])), str(r.get("fills", 0)), f"{r.get('staked', 0):,.0f}",
+                     _money(r.get("pnl", 0.0)), _money(r.get("touch_pnl", 0.0)),
+                     str(p.get("fills", 0)), _money(p.get("pnl", 0.0)),
+                     _money(p.get("official_pnl", 0.0)) if p.get("official_n") else "–"])
+        tot[0] += r.get("fills", 0); tot[1] += r.get("staked", 0.0); tot[2] += r.get("pnl", 0.0)
+        tot[3] += p.get("fills", 0); tot[4] += p.get("pnl", 0.0); tot[5] += p.get("official_pnl", 0.0)
+    rows.append(["<b>total</b>", str(tot[0]), f"{tot[1]:,.0f}", _money(tot[2]), "",
+                 str(tot[3]), _money(tot[4]), _money(tot[5])])
+    return (
+        f"<h2>Holding up against real results</h2>"
+        f"<p class='note'>Updated {escape(str(res.get('generated')))} UTC for strategy "
+        f"'{escape(str(res.get('strategy')))}'. Replay: the strategy run over each day's real "
+        f"trades and official winners. Paper: this bot's own trades, settled by its own prices and "
+        f"by the official winners. Touch-only: what the generous fill rule would have added.</p>"
+        + _table(["Day (UTC)", "Replay fills", "Staked", "Replay P&L", "Touch-only",
+                  "Paper fills", "Paper P&L (own)", "Paper P&L (official)"], rows))
+
+
 def page(directory: str | Path, mode: str) -> str:
     windows, trades = analysis.load(directory)
     now = time.time()
@@ -104,7 +132,8 @@ def page(directory: str | Path, mode: str) -> str:
             f"<style>{CSS}</style></head><body><main>")
     if not windows:
         return (head + f"<h1>btc5m <span class='badge'>{escape(mode)}</span></h1>"
-                f"<p class='sub'>No windows logged yet. Checked {stamp}.</p></main></body></html>")
+                f"<p class='sub'>No windows logged yet. Checked {stamp}.</p>"
+                + _check_section(Path(directory)) + "</main></body></html>")
     s = analysis.summary(windows)
     d = analysis.detail(windows, trades)
     age = now - (analysis._ts(windows[-1]["start"]) + 300)
@@ -131,13 +160,14 @@ def page(directory: str | Path, mode: str) -> str:
         f"{float(t['shares']):.2f}", f"{float(t['price']):.3f}", f"{float(t['p_used']):.3f}",
         f"{float(t['edge']):+.3f}", escape(t["note"][:40]),
     ] for t in trades[-15:][::-1]]
-    money = "Pretend money: fills are simulated." if mode == "paper" else "Real money."
+    money = "Real money." if mode == "live" else "Pretend money: fills are simulated."
     return head + (
         f"<h1>btc5m <span class='badge'>{escape(mode)}</span>"
         f"<span class='badge'>{escape(state)}</span></h1>"
         f"<p class='sub'>{money} {escape(str(s['first_window']))} to "
         f"{escape(str(s['last_window']))}. Page built {stamp}; refreshes every minute.</p>"
         f'<div class="tiles">{tile_html}</div>'
+        + _check_section(Path(directory)) +
         f"<h2>Cumulative profit by traded window</h2><div class='card'>{_chart(analysis.equity(windows))}</div>"
         f"<h2>Buys by entry price</h2>{_buckets(d['by_price'], '')}"
         f"<h2>Buys by seconds left at entry</h2>{_buckets(d['by_time_left'], 's')}"
