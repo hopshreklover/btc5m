@@ -123,9 +123,19 @@ would have made. Real-trade replay, per dollar staked:
 | Nov 9 – 16 (first test) | +1.2%, +$243 ± $195 | +2.0% | 11.7 |
 | Nov 16 – 18 (fresh: 708 markets nothing was fitted to) | +1.9%, +$133 ± $114 | +3.0% | 11.8 |
 
-Dollar figures are for $10 per fill. Positive in all three periods; five weeks
-combined is about 1.4 standard errors above zero, so encouraging rather than
-proven. `python -m btc5m check` (below) keeps testing it on each new day.
+Dollar figures are for $10 per fill, taking the first fill in each market.
+Positive in all three periods; five weeks combined is about 1.4 standard errors
+above zero, so encouraging rather than proven.
+
+**Replaying the bot's own code is less kind.** With orders filled completely
+(an earlier version stopped after 5 shares, which happened to dodge large
+sweeps), the default rule made +$76 on the tuning weeks, +$234 on the first
+test week and −$93 on the fresh days, with the daily loss limit cutting in
+often. Swings of about ±$100 every three days are as large as the edge itself.
+Bigger orders, several orders per market and wider price bands were tried
+(54 combinations): none held up on the test periods, and most went through a
+$200 bankroll. `python -m btc5m check` (below) keeps testing the strategy on
+each new day; that, not these replays, is the evidence to wait for.
 
 Small, and not yet proven: which of the two columns is closer to the truth
 depends on queue position, which trade data cannot show. Paper results land in
