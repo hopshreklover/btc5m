@@ -64,7 +64,7 @@ def _get_json(url: str, tries: int = 5):
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 return json.load(resp)
-        except (urllib.error.URLError, TimeoutError, ValueError):
+        except (OSError, ValueError):      # URLError, timeouts and dropped connections
             if attempt == tries - 1:
                 raise
             time.sleep(1.5 * (attempt + 1))
@@ -283,11 +283,11 @@ async def fetch_windows(starts: list[int], directory: str | Path, cfg: Config,
 
 
 def read_windows(directory: str | Path, lo: int, hi: int) -> Iterator[dict]:
-    """Stored markets with lo <= start < hi, oldest first, one at a time (a
-    week of trades does not fit in a small server's memory at once). A market
-    stored out of order, by a later retry, is left out."""
+    """Stored markets with lo <= start < hi, oldest first, one day's file in
+    memory at a time."""
     last = -1
     for path in sorted(Path(directory).glob("windows-*.jsonl.gz")):
+        rows = []
         try:
             with gzip.open(path, "rt", encoding="utf-8") as fh:
                 for line in fh:
@@ -295,11 +295,15 @@ def read_windows(directory: str | Path, lo: int, hi: int) -> Iterator[dict]:
                         row = json.loads(line)
                     except ValueError:
                         continue
-                    if lo <= row["start"] < hi and row["start"] > last:
-                        last = row["start"]
-                        yield row
+                    if lo <= row["start"] < hi:
+                        rows.append(row)
         except (EOFError, OSError):
-            continue                        # cut off mid-write: keep what was read
+            pass                            # cut off mid-write: keep what was read
+        rows.sort(key=lambda r: r["start"])
+        for row in rows:
+            if row["start"] > last:
+                last = row["start"]
+                yield row
 
 
 # ------------------------------------------------------------------- replay
@@ -384,6 +388,18 @@ def _books(win: dict, prints: list, ts: float) -> tuple[dict, dict]:
         else:
             up_bids.append([p, size])
             dn_asks.append([q, size])
+    # A second's trades in both directions can overlap (the price moved during the
+    # second), which would show the bot a crossed book. The live book is never
+    # crossed, and the bot refuses to trade on one, so leaving the overlap in would
+    # let it skip exactly the seconds where the price moved after its decision: a
+    # look-ahead that flattered results by several percent. Bids that overlap the
+    # asks are dropped (bids only matter for selling).
+    if up_asks:
+        lo = min(p for p, _ in up_asks)
+        up_bids = [b for b in up_bids if b[0] < lo]
+    if dn_asks:
+        lo = min(p for p, _ in dn_asks)
+        dn_bids = [b for b in dn_bids if b[0] < lo]
     return ({"t": "book", "ts": ts, "tok": win["up"], "bids": up_bids, "asks": up_asks},
             {"t": "book", "ts": ts, "tok": win["down"], "bids": dn_bids, "asks": dn_asks})
 
@@ -425,6 +441,11 @@ def market_events(windows: Iterable[dict], cfg: Config,
             yield up, False
             yield down, True
             yield {"t": "clock", "ts": fill_at}, False
+            if cfg.strategy == "rest":
+                # each real print as a trade in the Up token at its Up price
+                for _s, _d, u, size in by_sec[sec]:
+                    yield {"t": "trade", "ts": fill_at, "tok": win["up"], "p": u / 1000.0,
+                           "s": size}, False
             gone = fill_at + 0.001
             yield {"t": "book", "ts": gone, "tok": win["up"], "bids": [], "asks": []}, False
             yield {"t": "book", "ts": gone, "tok": win["down"], "bids": [], "asks": []}, False
@@ -445,6 +466,15 @@ def price_events(prices: Prices, lo: int, hi: int, feed_lag_s: float,
                    "pts": float(b)}, False
 
 
+def spot_events(prices: Prices, lo: int, hi: int, lag_s: float) -> Iterator[tuple[dict, bool]]:
+    """A direct exchange feed (what `spot_lead` listens to): the stand-in series
+    itself, each second's price arriving lag_s later."""
+    for b in range(lo, hi + 1):
+        p = prices.at(b)
+        if p is not None:
+            yield {"t": "px", "ts": b + lag_s, "src": "spot", "p": p}, False
+
+
 class _ReplayEngine(Engine):
     may_decide = True
 
@@ -455,13 +485,17 @@ class _ReplayEngine(Engine):
 
 def run_replay(cfg: Config, windows: Iterable[dict], prices: Prices, lo: int, hi: int, *,
                feed_lag_s: float, shift_s: int = 0, stamp_delay_s: float = 0.0,
-               journal: Journal | None = None, log: Log = lambda _m: None) -> Engine:
+               spot_lag_s: float | None = None, journal: Journal | None = None,
+               log: Log = lambda _m: None, on_fair: Callable | None = None) -> Engine:
+    """`spot_lag_s`: also feed a direct exchange price arriving that late (only
+    used by the engine when cfg.spot_lead is on)."""
     engine = _ReplayEngine(cfg, PaperBroker(cfg.paper_latency_s), journal, log=log)
-    stream = heapq.merge(
-        price_events(prices, lo, hi, feed_lag_s, shift_s),
-        market_events(windows, cfg, stamp_delay_s),
-        key=lambda pair: pair[0]["ts"],
-    )
+    engine.on_fair = on_fair
+    feeds = [price_events(prices, lo, hi, feed_lag_s, shift_s),
+             market_events(windows, cfg, stamp_delay_s)]
+    if spot_lag_s is not None:
+        feeds.append(spot_events(prices, lo, hi, spot_lag_s))
+    stream = heapq.merge(*feeds, key=lambda pair: pair[0]["ts"])
     for ev, may_decide in stream:
         engine.may_decide = may_decide
         engine.on_event(ev)

@@ -64,6 +64,15 @@ class Config:
     min_bankroll: float = 20.0
     kill_file: str = "STOP"          # create this file to block new entries
 
+    # --- strategy ----------------------------------------------------------
+    strategy: str = "take"           # take: buy at the ask when the model sees an edge;
+                                     # rest: keep a bid on the favourite (paper only, see rest.py)
+    rest_fav_min: float = 0.80       # quote a side whose best bid is in this band
+    rest_fav_max: float = 0.90
+    rest_from_s: float = 8.0         # seconds into the market
+    rest_until_s: float = 240.0
+    rest_usd: float = 10.0           # per resting order
+
     # --- optional faster spot feed (Coinbase) ------------------------------
     spot_lead: bool = False
     basis_halflife_s: float = 60.0
@@ -116,3 +125,7 @@ def validate(cfg: Config) -> None:
     need(cfg.min_edge > 0, "min_edge must be positive")
     need(cfg.no_trade_first_s + cfg.no_trade_last_s < WINDOW_S, "timing gates cover the whole window")
     need(cfg.daily_loss_limit > 0, "daily_loss_limit must be positive")
+    need(cfg.strategy in ("take", "rest"), "strategy must be 'take' or 'rest'")
+    need(0 < cfg.rest_fav_min <= cfg.rest_fav_max < 1, "need 0 < rest_fav_min <= rest_fav_max < 1")
+    need(0 <= cfg.rest_from_s < cfg.rest_until_s <= WINDOW_S, "rest window must fit the market")
+    need(0 < cfg.rest_usd <= cfg.max_window_usd, "rest_usd must be positive and <= max_window_usd")

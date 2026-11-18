@@ -25,6 +25,7 @@ from .book import Book
 from .broker import Fill, WindowView
 from .config import Config
 from .model import VolEstimator
+from .rest import RestingQuoter
 from .risk import Risk
 from .strategy import DOWN, SIDES, UP, Fair, decide, fair_value
 
@@ -95,6 +96,8 @@ class Engine:
         self.last_fair: Fair | None = None
         self.results: list[dict] = []
         self.fills: list[Fill] = []
+        self.on_fair: Callable | None = None   # research hook: (window, fair, price)
+        self.quoter = RestingQuoter(cfg) if cfg.strategy == "rest" else None
 
     # ------------------------------------------------------------------ events
     def on_event(self, ev: dict) -> None:
@@ -118,6 +121,12 @@ class Engine:
             hit = self._by_token.get(ev["tok"])
             if hit:
                 hit[0].official = hit[1]
+        elif kind == "trade":
+            hit = self._by_token.get(ev["tok"])
+            if hit and self.quoter and not hit[0].settled:
+                for fill in self.quoter.on_trade(hit[0], hit[1], float(ev["p"]),
+                                                 float(ev.get("s") or 0.0), ts):
+                    self._apply_fill(fill)
         self._housekeeping()
         self._maybe_trade()
         self._status()
@@ -204,7 +213,9 @@ class Engine:
         span = self.cfg.twap_s
         if span <= 0:
             return w.strike, w.end - self.now
-        left = w.end - self.cl_pts                      # in oracle time
+        # Time left as of the price in use: the faster exchange feed is current,
+        # the oracle's last tick is already a little old.
+        left = w.end - (self.now if self._spot_usable() else self.cl_pts)
         if left >= span:
             return w.strike, left - span * 2.0 / 3.0
         if left <= 0:
@@ -283,6 +294,9 @@ class Engine:
             winner, note = "?", "sat out: strike not seen"
         else:
             winner, note = "?", "outcome unknown"
+        if self.quoter:
+            extra = self.quoter.touch_note(w, winner)
+            note = f"{note}; {extra}" if note and extra else (note or extra)
         traded = w.buys > 0
         pnl = w.cash + (w.held.get(winner, 0.0) if winner in SIDES else 0.0)
         if traded and winner == "?":
@@ -311,12 +325,13 @@ class Engine:
             return self.risk.bankroll
         return min(self.risk.bankroll, self.cfg.bankroll)
 
-    def price_now(self) -> float | None:
+    def _spot_usable(self) -> bool:
         c = self.cfg
-        if (
-            c.spot_lead and self.spot is not None and self.basis_n >= 20
-            and self.now - self.spot_ts <= c.max_spot_age_s
-        ):
+        return (c.spot_lead and self.spot is not None and self.basis_n >= 20
+                and self.now - self.spot_ts <= c.max_spot_age_s)
+
+    def price_now(self) -> float | None:
+        if self._spot_usable():
             return self.spot + self.basis
         return self.cl
 
@@ -334,6 +349,9 @@ class Engine:
         w = self.active()
         if w is None:
             self.idle_reason = "no active market"
+            return
+        if self.quoter:
+            self._quote(w)
             return
         if self.broker.busy:
             self.idle_reason = "order in flight"
@@ -362,6 +380,8 @@ class Engine:
         strike, horizon = self.settle_terms(w, spot)
         fair = fair_value(c, spot, strike, horizon, self.vol.sigma, price_age_s=age)
         self.last_fair = fair
+        if self.on_fair:
+            self.on_fair(w, fair, spot)
         block = self.risk.blocked(self.now)
         if tau > (w.end - w.start) - c.no_trade_first_s or tau < c.no_trade_last_s:
             block = block or "outside trading part of the window"
@@ -381,6 +401,19 @@ class Engine:
         w.last_order_ts = self.now
         self.idle_reason = "order sent"
         self.broker.submit(order, self._view(w.start))
+
+    def _quote(self, w: Window) -> None:
+        """The resting-bid strategy: no model involved, only data-quality gates."""
+        block = self.risk.blocked(self.now)
+        if w.strike is None:
+            block = block or f"no strike ({w.strike_note or 'waiting'})"
+        elif any(self.now - b.ts > self.cfg.max_book_age_s for b in w.books.values()):
+            block = block or "order book stale"
+        elif w.spent + self.cfg.rest_usd > self.cfg.max_window_usd + 1e-9:
+            block = block or "window budget used"
+        self.idle_reason = self.quoter.update(w, self.now, block)
+        if block:
+            self.idle_reason = block
 
     # ------------------------------------------------------------------- status
     def _status(self) -> None:

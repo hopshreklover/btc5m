@@ -83,6 +83,9 @@ def market_events(ev, ts: float) -> list[dict]:
              "p": float(c.price), "s": float(c.size)}
             for c in p.price_changes
         ]
+    if kind == "last_trade_price":
+        return [{"t": "trade", "ts": ts, "tok": str(p.asset_id), "p": float(p.price),
+                 "s": float(p.size) if p.size is not None else 0.0, "side": p.side}]
     if kind == "market_resolved" and p.winning_asset_id:
         return [{"t": "resolved", "ts": ts, "tok": str(p.winning_asset_id)}]
     return []
@@ -395,6 +398,10 @@ async def run(
     from polymarket import AsyncPublicClient, AsyncSecureClient
 
     mode = "live" if live else "paper"
+    if cfg.strategy == "rest":
+        if live:
+            raise SystemExit("the 'rest' strategy is paper-only for now (see btc5m/rest.py)")
+        mode = "paper-rest"
     journal = Journal(Path(cfg.data_dir) / mode)
     recorder = (Recorder(Path(cfg.data_dir) / "recordings", cfg.record_keep_days)
                 if cfg.record else None)
@@ -458,7 +465,7 @@ async def run(
                 if recorder:
                     # Compact recording: every price tick, plus one top-of-book
                     # snapshot per second instead of every raw book update.
-                    if ev["t"] in ("px", "win", "resolved"):
+                    if ev["t"] in ("px", "win", "resolved", "trade"):
                         recorder.write(ev)
                     elif ev["t"] == "clock" and int(ev["ts"]) != last_snap:
                         last_snap = int(ev["ts"])

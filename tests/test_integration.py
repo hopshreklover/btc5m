@@ -482,3 +482,14 @@ def test_history_store_round_trip(tmp_path):
     assert [w["start"] for w in got] == [w["start"] for w in wins]
     assert [w["start"] for w in read_windows(tmp_path, T0 + 300, T0 + 900)] == [T0 + 300, T0 + 600]
     assert read_index(tmp_path) == {}
+
+
+def test_history_books_are_never_crossed():
+    """Trades in both directions within one second must not produce a crossed book
+    (the bot skips crossed books, which would be a look-ahead in a replay)."""
+    from btc5m.history import _books
+    win = {"up": "U", "down": "D"}
+    prints = [[5, 1, 520, 10.0], [5, 0, 540, 8.0], [5, 0, 500, 3.0], [5, 1, 560, 4.0]]
+    up, dn = _books(win, prints, 1.0)
+    assert min(a for a, _ in up["asks"]) == 0.52 and [b for b, _ in up["bids"]] == [0.5]
+    assert all(b < min(a for a, _ in dn["asks"]) for b, _ in dn["bids"])

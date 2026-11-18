@@ -463,3 +463,67 @@ def test_averaged_settlement_pricing_terms():
     _tick(plain, START, 70000.0)
     _tick(plain, START + 100, 70010.0)
     assert plain.settle_terms(plain.windows[START], 70010.0) == (70000.0, 200.0)
+
+
+# ------------------------------------------------------------- resting bids
+REST = replace(CFG, strategy="rest")
+
+
+def _rest_engine(fav_bid=0.85, fav_ask=0.86):
+    eng = Engine(REST, PaperBroker(0.5), log=quiet)
+    eng.on_event(_win(START, START - 100))
+    for t in range(START - 90, START + 1):
+        _tick(eng, t, 70000.0)
+    up_bids = [[fav_bid, 200.0], [round(fav_bid - 0.01, 2), 200.0]]
+    up_asks = [[fav_ask, 200.0]]
+    dn = lambda lv: [[round(1 - p, 2), s] for p, s in lv]  # noqa: E731
+    eng.on_event({"t": "book", "ts": START + 20.0, "tok": "u", "bids": up_bids, "asks": up_asks})
+    eng.on_event({"t": "book", "ts": START + 20.0, "tok": "d", "bids": dn(up_asks), "asks": dn(up_bids)})
+    eng.on_event({"t": "clock", "ts": START + 20.15})     # decisions run at most every 0.1 s
+    return eng
+
+
+def _trade(eng, ts, tok, p, s=50.0):
+    eng.on_event({"t": "trade", "ts": ts, "tok": tok, "p": p, "s": s})
+
+
+def test_rest_quotes_the_favourite_and_fills_only_on_a_sweep():
+    eng = _rest_engine()
+    q = eng.quoter.state[START].quotes
+    assert [x.price for x in q[UP]] == [0.85] and q[DOWN] == []      # only the favourite
+    _trade(eng, START + 20.2, "u", 0.84)            # before the order is live: nothing
+    assert eng.windows[START].buys == 0
+    _trade(eng, START + 21.0, "u", 0.85)            # at our price: queue unknown, not booked
+    assert eng.windows[START].buys == 0 and eng.quoter.state[START].touch
+    _trade(eng, START + 21.5, "d", 0.16)            # Down at 0.16 = Up at 0.84: swept through
+    w = eng.windows[START]
+    assert w.buys == 1 and w.held[UP] == pytest.approx(round(REST.rest_usd / 0.85, 2))
+    assert w.fees == 0                                               # makers pay no fee
+    _trade(eng, START + 22.0, "u", 0.80)            # one fill per side per market
+    assert eng.windows[START].buys == 1
+
+
+def test_rest_cancels_late_and_settles_with_touch_note():
+    eng = _rest_engine()
+    for t in range(START + 21, START + 241):        # quote stays up until 240 s
+        _tick(eng, t, 70000.0)
+    eng.on_event({"t": "book", "ts": START + 240.5, "tok": "u", "bids": [[0.85, 9.0]], "asks": [[0.86, 9.0]]})
+    eng.on_event({"t": "book", "ts": START + 240.5, "tok": "d", "bids": [[0.14, 9.0]], "asks": [[0.15, 9.0]]})
+    _trade(eng, START + 241.5, "u", 0.80)           # after cancel took effect: no fill
+    assert eng.windows[START].buys == 0
+    eng2 = _rest_engine()
+    _trade(eng2, START + 21.0, "u", 0.85)           # a touch only
+    for t in range(START + 1, START + 330):
+        _tick(eng2, t, 69990.0 if t > START + 200 else 70000.0)
+    res = eng2.results[0]
+    assert res["buys"] == 0 and "touch-only 1 pnl" in res["note"]
+
+
+def test_rest_ignores_sides_outside_the_band_and_bad_config():
+    eng = _rest_engine(fav_bid=0.70, fav_ask=0.71)
+    q = eng.quoter.state[START].quotes
+    assert q[UP] == [] and q[DOWN] == []
+    with pytest.raises(ValueError):
+        load_config(None, strategy="maker")
+    with pytest.raises(ValueError):
+        load_config(None, strategy="rest", rest_from_s=250.0, rest_until_s=240.0)

@@ -41,7 +41,7 @@ python -m venv .venv
 
 | Command | What it does |
 | --- | --- |
-| `python -m btc5m paper` | Trade the live markets with pretend money. Logs to `data/paper/`; records prices plus one book snapshot per second to `data/recordings/` (compressed, 14 days kept). |
+| `python -m btc5m paper` | Trade the live markets with pretend money. Logs to `data/paper/` (`data/paper-rest/` with `strategy = "rest"`); records prices, trades and one book snapshot per second to `data/recordings/` (compressed, 14 days kept). |
 | `python -m btc5m report` | Summarise logged results, then break the buys down by entry price and by time left: what the bot predicted versus how often it actually won. `--mode NAME` reads another log folder. |
 | `python -m btc5m dashboard --host 0.0.0.0 --port 8501` | Serve the same results as a read-only web page (refreshes every minute). Defaults to localhost only. |
 | `python -m btc5m history --days 7` | Replay the bot over real history: every real trade and the official winner of each past market, with the bot's price feed delayed by 0.4, 1.4 and 2.4 seconds (the live feed measured 1.4), once for each settlement rule (`instant` and `avg60`). Downloads public data (resumable) into `data/history/`; results land in `data/history-RULE-lagN/` for `report --mode history-avg60-lag1.4`. Prices, sizes and winners are real; that the bot would have reached each quote first is an assumption. It also re-settles the paper and live logs with the official winners. |
@@ -82,6 +82,48 @@ stale, the local clock disagrees with the oracle's by more than 2.5 seconds,
 volatility has not warmed up, the window is in its first 8 or last 6 seconds,
 the price is outside 0.08–0.92, the daily loss limit is hit, a loss streak
 triggered a cool-down, or a file named `STOP` exists in the working folder.
+
+## What four weeks of real history say
+
+Tested on every real trade and official result from Oct 19 to Nov 16 (8,000
+markets): rules were tuned on the first three weeks and the last week was used
+once, as a test.
+
+- **Buying at the ask on the model's say-so does not work**, with the oracle
+  feed or a 2-second-faster exchange feed, at any threshold, time of window or
+  price band that still trades 3+ times an hour. Results swing from profit to
+  loss with the assumptions you cannot check (fill price within a second,
+  timestamp alignment) and flip sign between periods. The market's own price is
+  a better predictor than the model.
+- **Two traps in replays** were found and fixed: published trade times run about
+  2.3 s behind the real trade, and a book rebuilt from one second's trades can
+  look crossed exactly when the price moved after the decision. Either one, left
+  in, turns a losing rule into a winning one.
+- **Cheap long-shot shares are overpriced**: buying them at 0.10–0.20 lost
+  15–25% per dollar in every week. The one consistently non-negative rule found
+  is to sit on the other side of that: the `rest` strategy below.
+
+## Strategies
+
+`strategy = "take"` (default) is everything in "How it decides" above.
+
+`strategy = "rest"` (paper only) keeps a bid on the favourite while its best bid
+is 0.80–0.90, from 8 s to 240 s into the market, $10 per order, one fill per
+side per market. That is the same as an offer on the long shot at 0.10–0.20.
+Makers pay no fee here. Paper fills are strict: a fill is booked only when the
+favourite trades below the bid, so the whole queue at that price was used up.
+Trades exactly at the bid are logged per market as `touch-only` with what they
+would have made. Real-trade replay, per dollar staked:
+
+| Period | Strict fills | Generous fills (touches count) | Fills/hour |
+| --- | --- | --- | --- |
+| Oct 19 – Nov 9 (tuning) | +0.3% ± 0.6 | +1.0% ± 0.6 | 13 |
+| Nov 9 – 16 (held out) | +1.0% ± 0.9 | +1.7% ± 0.9 | 13 |
+
+Small, and not yet proven: which of the two columns is closer to the truth
+depends on queue position, which trade data cannot show. Paper results land in
+`data/paper-rest/`; the `live` command refuses this strategy until the live
+broker handles resting orders.
 
 ## What is better than the usual versions of this bot
 
@@ -162,8 +204,9 @@ btc5m/
   analysis.py       where the profit or loss came from
   dashboard.py      read-only results page
   history.py        replay over real past trades and official results
+  rest.py           the resting-bid strategy and its paper fills
   coinbase.py       price download
   calibrate.py      model scoring
   sim.py            synthetic market for offline runs
-tests/              48 tests, no network needed
+tests/              52 tests, no network needed
 ```
