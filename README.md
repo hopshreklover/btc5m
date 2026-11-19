@@ -137,6 +137,15 @@ Bigger orders, several orders per market and wider price bands were tried
 $200 bankroll. `python -m btc5m check` (below) keeps testing the strategy on
 each new day; that, not these replays, is the evidence to wait for.
 
+Also tried and rejected (tuned on the older weeks first): sitting out when
+Bitcoin is volatile (P&L does not depend on it), bidding 1–5 cents below the
+best bid (worse at every depth), selling to favourite buyers instead (−4% to
+−15% per dollar: they are the informed side), and restricting fills to parts
+of the market (the last minute loses in every period; no earlier slice wins
+in all of them). Replaying the bot's own recordings of real order books and
+trades (Nov 18–19, 290 markets) with a queue-position fill model
+(`rest_fill = "queue"`): −2.4% per dollar.
+
 Small, and not yet proven: which of the two columns is closer to the truth
 depends on queue position, which trade data cannot show. Paper results land in
 `data/paper-rest/`; the `live` command refuses this strategy until the live
