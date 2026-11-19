@@ -50,7 +50,8 @@ from .engine import Engine
 from .journal import Journal
 from .strategy import DOWN, UP
 
-GAMMA = "https://gamma-api.polymarket.com/events?slug=btc-updown-5m-{start}"
+GAMMA = "https://gamma-api.polymarket.com/events?slug={slug}"
+SLUG = "btc-updown-5m-{start}"          # other series: eth-updown-5m-, btc-updown-15m-, ...
 KLINES = ("https://data-api.binance.vision/api/v3/klines"
           "?symbol=BTCUSDT&interval=1s&limit=1000&startTime={ms}")
 INDEX_COLS = ["start", "winner", "strike", "final", "prints", "volume"]
@@ -156,7 +157,7 @@ def _listed(value) -> list:
     return json.loads(value) if isinstance(value, str) else list(value or [])
 
 
-def parse_market(payload, start: int, cfg: Config) -> dict | None:
+def parse_market(payload, start: int, cfg: Config, length: int = WINDOW_S) -> dict | None:
     """Reduce the exchange's description of one past market to what the replay
     needs. None if it is missing or has no official winner yet."""
     ev = payload[0] if isinstance(payload, list) and payload else payload
@@ -174,7 +175,7 @@ def parse_market(payload, start: int, cfg: Config) -> dict | None:
     meta = ev.get("eventMetadata") or {}
     fees = m.get("feeSchedule") or {}
     return {
-        "start": start, "slug": ev.get("slug", ""), "cid": m.get("conditionId", ""),
+        "start": start, "length": length, "slug": ev.get("slug", ""), "cid": m.get("conditionId", ""),
         "up": tokens[up_i], "down": tokens[down_i],
         "winner": UP if settle[up_i] > 0.5 else DOWN,
         "strike": meta.get("priceToBeat"), "final": meta.get("finalPrice"),
@@ -196,7 +197,7 @@ def add_print(agg: dict, win: dict, ts: float, token: str, side: str, price: flo
     1-u; a direction-0 trade shows an Up bid at u and a Down ask at 1-u.
     """
     sec = int(ts) - win["start"]
-    if not 0 <= sec < WINDOW_S or size <= 0 or not 0 < price < 1:
+    if not 0 <= sec < win.get("length", WINDOW_S) or size <= 0 or not 0 < price < 1:
         return
     is_up = token == win["up"]
     if not is_up and token != win["down"]:
@@ -206,8 +207,10 @@ def add_print(agg: dict, win: dict, ts: float, token: str, side: str, price: flo
     agg[key] = agg.get(key, 0.0) + size
 
 
-async def _fetch_window(pub, start: int, cfg: Config) -> dict | None:
-    win = parse_market(await asyncio.to_thread(_get_json, GAMMA.format(start=start)), start, cfg)
+async def _fetch_window(pub, start: int, cfg: Config, slug: str = SLUG,
+                        length: int = WINDOW_S) -> dict | None:
+    url = GAMMA.format(slug=slug.format(start=start))
+    win = parse_market(await asyncio.to_thread(_get_json, url), start, cfg, length)
     if win is None:
         return None
     agg: dict = {}
@@ -230,7 +233,8 @@ def read_index(directory: str | Path) -> dict[int, dict]:
 
 
 async def fetch_windows(starts: list[int], directory: str | Path, cfg: Config,
-                        log: Log = print, concurrency: int = 4) -> None:
+                        log: Log = print, concurrency: int = 4, slug: str = SLUG,
+                        length: int = WINDOW_S) -> None:
     """Download markets and their trades into `directory`; skips what is there."""
     from polymarket import AsyncPublicClient
 
@@ -246,7 +250,7 @@ async def fetch_windows(starts: list[int], directory: str | Path, cfg: Config,
     async def one(pub, start: int):
         for attempt in range(3):
             try:
-                return await _fetch_window(pub, start, cfg)
+                return await _fetch_window(pub, start, cfg, slug, length)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - network or rate limit: retry
