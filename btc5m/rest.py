@@ -82,7 +82,7 @@ class RestingQuoter:
                 ask = w.books[side].best_ask()
                 if (bid is not None and c.rest_fav_min <= bid <= c.rest_fav_max
                         and (ask is None or ask > bid)):
-                    want = bid
+                    want = round(bid - c.rest_offset, 2)
             live = [q for q in st.quotes[side] if q.cancel_at > now]
             st.quotes[side] = live
             pending = [q for q in live if q.cancel_at >= 1e17]

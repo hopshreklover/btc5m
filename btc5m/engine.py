@@ -55,6 +55,7 @@ class Window:
     last_order_ts: float = 0.0
     started: bool = False
     settled: bool = False
+    sigma_start: float = float("nan")    # the bot's volatility estimate when the market opened
 
 
 def _hms(ts: float) -> str:
@@ -238,6 +239,7 @@ class Engine:
         for w in list(self.windows.values()):
             if not w.started and self.now >= w.start:
                 w.started = True
+                w.sigma_start = self.vol.sigma if self.vol.ready else float("nan")
                 self.risk.on_window_start(self.now)
             if not w.settled and self.now >= w.end:
                 waited = self.now - w.end
@@ -307,6 +309,7 @@ class Engine:
             "winner": winner, "buys": w.buys, "misses": w.misses, "spent": round(w.spent, 4),
             "fees": round(w.fees, 4), "pnl": round(pnl, 4),
             "bankroll": round(self.risk.bankroll, 4), "note": note,
+            "sigma": w.sigma_start,
         }
         self.results.append(res)
         if traded or note:
@@ -411,6 +414,9 @@ class Engine:
             block = block or "order book stale"
         elif w.spent >= self.quoter.budget() - 0.5:
             block = block or "window budget used"
+        elif self.cfg.rest_max_sigma > 0 and (not self.vol.ready
+                                               or self.vol.sigma > self.cfg.rest_max_sigma):
+            block = block or "bitcoin too volatile"
         self.idle_reason = self.quoter.update(w, self.now, block)
         if block:
             self.idle_reason = block

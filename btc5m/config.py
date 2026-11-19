@@ -74,6 +74,9 @@ class Config:
     rest_usd: float = 10.0           # per resting order
     rest_max_fills: int = 1          # completely filled orders allowed per market
     rest_refill_s: float = 5.0       # wait after a fill before posting the next order
+    rest_offset: float = 0.0         # bid this far below the best bid (0 = join it)
+    rest_max_sigma: float = 0.0      # sit out while the volatility estimate (per sqrt-second)
+                                     # is above this; 0 = never
 
     # --- optional faster spot feed (Coinbase) ------------------------------
     spot_lead: bool = False

@@ -34,7 +34,7 @@ class Journal:
         path = self.dir / name
         new = not path.exists()
         with path.open("a", newline="", encoding="utf-8") as fh:
-            wr = csv.DictWriter(fh, fieldnames=cols)
+            wr = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
             if new:
                 wr.writeheader()
             wr.writerow(row)
