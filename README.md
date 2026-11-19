@@ -146,6 +146,15 @@ in all of them). Replaying the bot's own recordings of real order books and
 trades (Nov 18–19, 290 markets) with a queue-position fill model
 (`rest_fill = "queue"`): −2.4% per dollar.
 
+Other markets (resting bid on the favourite, strict fills, earlier 2/3 → later
+1/3 of each period; `research/maker_scan.py`): Ethereum 5m −1.4% → −3.0%,
+Solana 5m −2.7% → −5.6%, XRP 5m −2.1% → −5.3% (14 days each); Bitcoin 15m
+−3.1% → −0.2% (28 days), Ethereum/Solana/XRP 15m negative or too few fills.
+Long-shot overpricing is weaker outside Bitcoin 5m, and on Solana long shots
+were if anything cheap. Also rejected on Bitcoin 5m: buying near-certain
+favourites (0.90–0.99) in the last minute, which trades under 2 times an hour
+and loses at the worst traded price.
+
 Small, and not yet proven: which of the two columns is closer to the truth
 depends on queue position, which trade data cannot show. Paper results land in
 `data/paper-rest/`; the `live` command refuses this strategy until the live
