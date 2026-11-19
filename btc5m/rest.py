@@ -49,6 +49,7 @@ class _Quote:
     active_from: float    # when the exchange would have it
     filled: float = 0.0
     cancel_at: float = 1e18
+    ahead: float = 0.0    # shares queued ahead of us at our price (rest_fill = "queue")
 
 
 @dataclass
@@ -97,7 +98,9 @@ class RestingQuoter:
                     self._cancel(st, side, now)
                 shares = round(min(c.rest_usd, left) / want, 2)
                 if shares >= max(w.min_size, 5.0):
-                    st.quotes[side].append(_Quote(want, shares, now + c.paper_latency_s))
+                    ahead = w.books[side].bids.get(round(want, 4), 0.0)
+                    st.quotes[side].append(_Quote(want, shares, now + c.paper_latency_s,
+                                                  ahead=ahead))
         return ("resting bid " + ", ".join(quoting)) if quoting else "no favourite in band"
 
     def budget(self) -> float:
@@ -124,7 +127,17 @@ class RestingQuoter:
             for q in list(st.quotes[fav]):
                 if now < q.active_from or now >= q.cancel_at:
                     continue
-                if px < q.price - 1e-9:                    # swept through our level
+                at_level = abs(px - q.price) <= 1e-9
+                if at_level and self.cfg.rest_fill == "queue":
+                    # trades at our price use up the queue ahead of us first;
+                    # cancellations ahead of us are ignored (pessimistic)
+                    used = min(q.ahead, size)
+                    q.ahead -= used
+                    if size - used <= 1e-9:
+                        st.touch.append((fav, q.price, 0.0))
+                        continue
+                    size -= used
+                if px < q.price - 1e-9 or (at_level and self.cfg.rest_fill == "queue"):
                     take = round(min(q.shares - q.filled, size), 2)
                     if take <= 0:
                         continue
@@ -150,7 +163,7 @@ class RestingQuoter:
     def _fill(self, w, side: str, price: float, shares: float, now: float) -> Fill:
         o = Order(w.start, side, "BUY", w.tokens[side], round(shares * price, 4), shares,
                   price, now, float("nan"), float("nan"), 0.0)
-        return Fill(o, now, shares, shares * price, 0.0, "resting bid (strict fill)")
+        return Fill(o, now, shares, shares * price, 0.0, f"resting bid ({self.cfg.rest_fill} fill)")
 
     # -------------------------------------------------------- settlement
     def touch_note(self, w, winner: str) -> str:

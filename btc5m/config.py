@@ -75,6 +75,9 @@ class Config:
     rest_max_fills: int = 1          # completely filled orders allowed per market
     rest_refill_s: float = 5.0       # wait after a fill before posting the next order
     rest_offset: float = 0.0         # bid this far below the best bid (0 = join it)
+    rest_fill: str = "strict"        # paper fills: "strict" = only when trades go below our bid;
+                                     # "queue" = also at our price once the shares queued
+                                     # ahead of us (from the real book) have traded
     rest_max_sigma: float = 0.0      # sit out while the volatility estimate (per sqrt-second)
                                      # is above this; 0 = never
 
@@ -135,3 +138,4 @@ def validate(cfg: Config) -> None:
     need(0 <= cfg.rest_from_s < cfg.rest_until_s <= WINDOW_S, "rest window must fit the market")
     need(0 < cfg.rest_usd <= cfg.max_window_usd, "rest_usd must be positive and <= max_window_usd")
     need(cfg.rest_max_fills >= 1 and cfg.rest_refill_s >= 0, "rest_max_fills >= 1, rest_refill_s >= 0")
+    need(cfg.rest_fill in ("strict", "queue"), "rest_fill must be 'strict' or 'queue'")

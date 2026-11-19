@@ -554,3 +554,25 @@ def test_rest_ignores_sides_outside_the_band_and_bad_config():
         load_config(None, strategy="maker")
     with pytest.raises(ValueError):
         load_config(None, strategy="rest", rest_from_s=250.0, rest_until_s=240.0)
+
+
+def test_rest_queue_fills_only_after_the_queue_ahead_has_traded():
+    eng = Engine(replace(REST, rest_fill="queue"), PaperBroker(0.5), log=quiet)
+    eng.on_event(_win(START, START - 100))
+    for t in range(START - 90, START + 1):
+        _tick(eng, t, 70000.0)
+    eng.on_event({"t": "book", "ts": START + 20.0, "tok": "u", "bids": [[0.85, 30.0]], "asks": [[0.86, 99.0]]})
+    eng.on_event({"t": "book", "ts": START + 20.0, "tok": "d", "bids": [[0.14, 99.0]], "asks": [[0.15, 30.0]]})
+    eng.on_event({"t": "clock", "ts": START + 20.15})
+    (q,) = eng.quoter.state[START].quotes[UP]
+    assert q.ahead == 30.0
+    _trade(eng, START + 21.0, "u", 0.85, s=20.0)          # 10 shares still ahead of us
+    assert eng.windows[START].buys == 0 and q.ahead == pytest.approx(10.0)
+    _trade(eng, START + 21.5, "d", 0.15, s=14.0)          # same level seen from Down: 4 reach us
+    w = eng.windows[START]
+    assert w.buys == 1 and w.held[UP] == pytest.approx(4.0)
+    _trade(eng, START + 22.0, "u", 0.84, s=50.0)          # a sweep through fills the rest
+    assert w.held[UP] == pytest.approx(round(REST.rest_usd / 0.85, 2))
+    strict = _rest_engine()                               # the strict rule never fills at the level
+    _trade(strict, START + 21.0, "u", 0.85, s=500.0)
+    assert strict.windows[START].buys == 0
