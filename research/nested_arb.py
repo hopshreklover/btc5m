@@ -18,7 +18,23 @@ from pathlib import Path
 FEE = 0.07
 
 
-def load(dirs):
+def compact(w, lo, hi):
+    """Keep only what the test needs: per second in [lo, hi), the prices that
+    buyers of each side paid (so a week of markets fits in a small server)."""
+    secs = {}
+    for sec, d, u, size in w["prints"]:
+        if not lo <= sec < hi:
+            continue
+        p = u / 1000.0
+        side, price = ("up", p) if d else ("dn", round(1 - p, 4))
+        secs.setdefault(sec, {"up": [], "dn": []})[side].append(price)
+    w = dict(w)
+    w.pop("prints", None)
+    w["secs"] = secs
+    return w
+
+
+def load(dirs, lo, hi, want=None):
     out = {}
     for d in dirs:
         for path in sorted(Path(d).glob("windows-*.jsonl.gz")):
@@ -29,20 +45,16 @@ def load(dirs):
                             w = json.loads(line)
                         except ValueError:
                             continue
-                        out.setdefault(w["start"], w)
+                        if w["start"] in out or (want is not None and w["start"] not in want):
+                            continue
+                        out[w["start"]] = compact(w, lo, hi)
             except (EOFError, OSError):
                 pass
     return out
 
 
 def per_second(w):
-    """sec -> {"up": [prices bought], "dn": [...]}"""
-    out = {}
-    for sec, d, u, size in w["prints"]:
-        p = u / 1000.0
-        side, price = ("up", p) if d else ("dn", round(1 - p, 4))
-        out.setdefault(sec, {"up": [], "dn": []})[side].append(price)
-    return out
+    return w["secs"]
 
 
 def fee(p):
@@ -58,8 +70,8 @@ def stats(v):
 
 
 if __name__ == "__main__":
-    m15 = load([sys.argv[1]])
-    m5 = load(sys.argv[2:])
+    m15 = load([sys.argv[1]], 605, 895)
+    m5 = load(sys.argv[2:], 5, 295, want={s + 600 for s in m15})
     pairs, diffs = [], []
     for s15, w15 in sorted(m15.items()):
         w5 = m5.get(s15 + 600)
