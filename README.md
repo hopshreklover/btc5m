@@ -155,6 +155,22 @@ were if anything cheap. Also rejected on Bitcoin 5m: buying near-certain
 favourites (0.90–0.99) in the last minute, which trades under 2 times an hour
 and loses at the worst traded price.
 
+**One structural edge found: nested markets.** Each 15-minute Bitcoin market
+ends at the same moment as the last 5-minute market inside it, and in all
+2,678 pairs over 28 days both settled on exactly the same final price. So
+5-minute Up + 15-minute Down (when the 5-minute starting price is at or below
+the 15-minute one; the opposite pair otherwise) always pays at least $1, and
+$2 when Bitcoin finishes between the two starting prices (31% of markets).
+From real trades (`research/nested_arb.py`): the pair cost under $1 after fees
+about 14 times a day at the cheapest prices traded (+11% to +15% per pair), but
+only about 3 times a day at the worst prices traded (+0.6% to +5%). Both legs
+have to be bought before other traders take them, so `research/pair_monitor.py`
+(service `btc5m-pairs`, no orders) now records the real order books every
+second in the last 5 minutes of each 15-minute market; `research/pair_report.py`
+scores them against the official results. Starting prices are not published
+during the market, so a live version would have to compute them from the
+oracle, as the bot already does.
+
 Small, and not yet proven: which of the two columns is closer to the truth
 depends on queue position, which trade data cannot show. Paper results land in
 `data/paper-rest/`; the `live` command refuses this strategy until the live
