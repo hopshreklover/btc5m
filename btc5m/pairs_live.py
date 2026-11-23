@@ -5,7 +5,7 @@ streams the coin's oracle price (for the starting prices), reads the four order
 books once a second during the last 5 minutes of every 15-minute market, makes
 paper buys with `pairs.PairPaper`, and settles them with the official results.
 Files in OUT/<coin>/ (default data/pairs/<coin>/):
-  books-YYYYMMDD.csv   snapshots where either pairing cost <= 1.01
+  books-YYYYMMDD.csv   snapshots where the safe pairing cost <= 1.01
   trades.csv           paper buys
   settled.csv          official strikes and winners, with the bot's own estimates
   results.csv          settled paper buys
@@ -24,7 +24,8 @@ from .config import Config
 from .history import GAMMA, _get_json, parse_market
 from .pairs import PairPaper, TickBuffer, choose_pair, pair_quote
 
-LOG_BELOW = 1.01      # one of the two pairings is always near $1, so log only the cheap side
+LOG_BELOW = 1.01      # log the safe pairing (by the estimated strikes) when it costs this or less;
+                      # the other pairing is always cheap (both together are all four tokens, ~$2)
 
 
 def _append(path: Path, row: list, header: list) -> None:
@@ -155,7 +156,8 @@ async def _coin_loop(pub, coin: str, pp: PairPaper, buf: TickBuffer, out: Path, 
             seen += 1
             ca, sa, _, _ = pair_quote(asks, "a")
             cb, sb, _, _ = pair_quote(asks, "b")
-            if min(ca, cb) <= LOG_BELOW:
+            safe = choose_pair(k5, k15, (k15 or 0.0) * pp.strike_margin_bp / 1e4)
+            if safe and (ca if safe == "a" else cb) <= LOG_BELOW:
                 logged += 1
                 _append(path, [round(t, 2), s15, round(t - s15 - 600, 1), round(ca, 4), sa,
                                round(cb, 4), sb, k5, k15],
