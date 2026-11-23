@@ -5,7 +5,7 @@ streams the coin's oracle price (for the starting prices), reads the four order
 books once a second during the last 5 minutes of every 15-minute market, makes
 paper buys with `pairs.PairPaper`, and settles them with the official results.
 Files in OUT/<coin>/ (default data/pairs/<coin>/):
-  books-YYYYMMDD.csv   snapshots where either pairing cost <= 1.05
+  books-YYYYMMDD.csv   snapshots where either pairing cost <= 1.01
   trades.csv           paper buys
   settled.csv          official strikes and winners, with the bot's own estimates
   results.csv          settled paper buys
@@ -24,7 +24,7 @@ from .config import Config
 from .history import GAMMA, _get_json, parse_market
 from .pairs import PairPaper, TickBuffer, choose_pair, pair_quote
 
-LOG_BELOW = 1.05
+LOG_BELOW = 1.01      # one of the two pairings is always near $1, so log only the cheap side
 
 
 def _append(path: Path, row: list, header: list) -> None:
