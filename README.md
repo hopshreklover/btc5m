@@ -260,5 +260,5 @@ btc5m/
   coinbase.py       price download
   calibrate.py      model scoring
   sim.py            synthetic market for offline runs
-tests/              61 tests, no network needed
+tests/              62 tests, no network needed
 ```

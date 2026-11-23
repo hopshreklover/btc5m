@@ -124,6 +124,11 @@ class PairPaper:
         self.trades.append(trade)
         return trade
 
+    def restore(self, trade: PairTrade) -> None:
+        """Put back a paper buy from a previous run that has not been settled yet."""
+        self.trades.append(trade)
+        self._count[trade.start15] = self._count.get(trade.start15, 0) + 1
+
     def settle(self, start15: int, winner5: str, winner15: str) -> list[PairTrade]:
         """Official winners ('UP'/'DOWN') for both markets; returns the settled trades."""
         out = []

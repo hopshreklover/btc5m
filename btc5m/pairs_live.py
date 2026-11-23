@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .config import Config
 from .history import GAMMA, _get_json, parse_market
-from .pairs import PairPaper, TickBuffer, choose_pair, pair_quote
+from .pairs import PairPaper, PairTrade, TickBuffer, choose_pair, pair_quote
 
 LOG_BELOW = 1.01      # log the safe pairing (by the estimated strikes) when it costs this or less;
                       # the other pairing is always cheap (both together are all four tokens, ~$2)
@@ -88,6 +88,44 @@ async def _oracle(pub, bufs: dict, log) -> None:
         except Exception as exc:  # noqa: BLE001 - keep the feed alive
             delay = retry.failed(exc)
         await asyncio.sleep(delay)
+
+
+def _rows(path: Path) -> list[dict]:
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            return list(csv.DictReader(fh))
+    except OSError:
+        return []
+
+
+def _num(x) -> float | None:
+    try:
+        v = float(x)
+        return v if v == v else None
+    except (TypeError, ValueError):
+        return None
+
+
+def resume(coin_dir: Path, pp: PairPaper, now: float, lookback_s: float = 6 * 3600) -> dict[int, dict]:
+    """After a restart: put back paper buys that have no result yet, and return the
+    recent markets (start -> estimated strikes) that still need settling."""
+    settled = {int(r["start15"]) for r in _rows(coin_dir / "settled.csv")}
+    done = {(int(r["start15"]), r["pair"]) for r in _rows(coin_dir / "results.csv")}
+    todo: dict[int, dict] = {}
+    for r in _rows(coin_dir / "trades.csv"):
+        s15 = int(r["start15"])
+        if (s15, r["pair"]) in done or s15 in settled:
+            continue
+        pp.restore(PairTrade(s15, r["pair"], float(r["shares"]), float(r["p5"]), float(r["p15"]),
+                             float(r["cost"]), float(r["ts"])))
+        todo.setdefault(s15, {"k5": _num(r.get("k5_est")), "k15": _num(r.get("k15_est"))})
+    for path in sorted(coin_dir.glob("books-*.csv"))[-2:]:
+        for r in _rows(path):
+            s15 = int(r["start15"])
+            if s15 in settled or now - s15 > lookback_s or s15 + 900 > now:
+                continue
+            todo[s15] = {"k5": _num(r.get("k5_est")), "k15": _num(r.get("k15_est"))}
+    return todo
 
 
 async def _settle(coin: str, pp: PairPaper, s15: int, est: dict, out: Path, log) -> None:
@@ -182,6 +220,13 @@ async def run_pairs(out: Path, papers: dict[str, PairPaper], log=print) -> None:
     bufs = {c: TickBuffer() for c in papers}
     async with AsyncPublicClient() as pub:
         tasks = [asyncio.create_task(_oracle(pub, bufs, log))]
+        for c, pp in papers.items():
+            todo = resume(out / c, pp, time.time())
+            if todo:
+                log(f"pairs {c}: resuming {len(todo)} unsettled market(s), "
+                    f"{sum(1 for t in pp.trades if t.payoff is None)} open paper trade(s)")
+            for s15, est in todo.items():
+                tasks.append(asyncio.create_task(_settle(c, pp, s15, est, out / c, log)))
         tasks += [asyncio.create_task(_coin_loop(pub, c, pp, bufs[c], out / c, log))
                   for c, pp in papers.items()]
         any_pp = next(iter(papers.values()))

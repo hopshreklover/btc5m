@@ -69,3 +69,29 @@ def test_vanishing_or_expensive_quotes_are_not_bought():
     pp4 = PairPaper()
     pp4.on_snapshot(1.0, 900, cheap, 64000.0, 64001.0)
     assert pp4.on_snapshot(2.0, 900, cheap, 64000.0, 64001.0) is None   # strikes too close
+
+
+def test_resume_restores_open_trades_and_unsettled_markets(tmp_path):
+    from btc5m.pairs_live import resume
+
+    (tmp_path / "trades.csv").write_text(
+        "ts,start15,pair,shares,p5,p15,cost,k5_est,k15_est\n"
+        "1000.0,900,a,20.0,0.4,0.5,0.9325,100.0,101.0\n"
+        "2000.0,1800,b,10.0,0.45,0.5,0.9849,101.0,100.0\n", encoding="utf-8")
+    (tmp_path / "results.csv").write_text(
+        "start15,pair,official_pair,shares,cost,payoff,pnl\n900,a,a,20.0,0.9325,1.0,1.35\n",
+        encoding="utf-8")
+    (tmp_path / "settled.csv").write_text(
+        "start15,strike5,strike15,winner5,winner15,final5,final15,k5_est,k15_est\n"
+        "900,100,101,UP,UP,1,1,100,101\n", encoding="utf-8")
+    (tmp_path / "books-20270101.csv").write_text(
+        "ts,start15,sec5,cost_a,size_a,cost_b,size_b,k5_est,k15_est\n"
+        "2700.5,2700,10,0.98,9,1.3,9,99.0,98.0\n"
+        "9999.0,9900,10,0.98,9,1.3,9,99.0,98.0\n", encoding="utf-8")
+    pp = PairPaper()
+    todo = resume(tmp_path, pp, now=4000.0)
+    assert sorted(todo) == [1800, 2700]              # 900 settled; 9900 not finished yet
+    assert [t.start15 for t in pp.trades] == [1800] and todo[2700] == {"k5": 99.0, "k15": 98.0}
+    assert pp.on_snapshot(1.0, 1800, asks(u5=0.4, d15=0.5), 64000.0, 64010.0) is None  # already traded
+    (s,) = pp.settle(1800, "DOWN", "UP")
+    assert s.payoff == 2.0
