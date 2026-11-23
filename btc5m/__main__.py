@@ -170,10 +170,12 @@ def cmd_pairs(args: argparse.Namespace) -> int:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
-    pp = PairPaper(max_cost=args.max_cost, usd=args.usd, strike_margin=args.strike_margin)
+    coins = [c.strip().lower() for c in args.coins.split(",") if c.strip()]
+    papers = {c: PairPaper(max_cost=args.max_cost, usd=args.usd,
+                           strike_margin_bp=args.strike_margin_bp) for c in coins}
     out = Path(args.data_dir or Config().data_dir) / "pairs"
     try:
-        asyncio.run(run_pairs(out, pp, log=lambda m: print(m, flush=True)))
+        asyncio.run(run_pairs(out, papers, log=lambda m: print(m, flush=True)))
     except KeyboardInterrupt:
         pass
     return 0
@@ -255,8 +257,9 @@ def main(argv: list[str] | None = None) -> int:
     pa = sub.add_parser("pairs", help="paper-trade the nested 5m/15m Bitcoin pair (no orders)")
     pa.add_argument("--max-cost", type=float, default=0.99, help="per pair, fees included")
     pa.add_argument("--usd", type=float, default=20.0, help="per paper trade")
-    pa.add_argument("--strike-margin", type=float, default=3.0,
-                    help="skip when the two starting prices are closer than this ($)")
+    pa.add_argument("--strike-margin-bp", type=float, default=0.5,
+                    help="skip when the two starting prices are closer than this (basis points)")
+    pa.add_argument("--coins", default="btc,eth,sol,xrp")
 
     da = sub.add_parser("dashboard", help="serve a read-only results page")
     da.add_argument("--mode", default="paper")

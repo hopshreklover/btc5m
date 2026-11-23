@@ -87,14 +87,16 @@ class PairPaper:
     min_shares: float = 5.0
     usd: float = 20.0            # per pair trade
     max_trades: int = 1          # per 15-minute market
-    strike_margin: float = 3.0   # skip when the two starting prices are closer than this ($)
+    strike_margin_bp: float = 0.5   # skip when the starting prices are closer than this many
+                                    # basis points of the price (0.5 bp ~ $3 on Bitcoin)
     trades: list[PairTrade] = field(default_factory=list)
     _pending: dict = field(default_factory=dict)   # start15 -> (pair, cost, p5, p15) seen last time
     _count: dict = field(default_factory=dict)
 
     def on_snapshot(self, ts: float, start15: int, asks: dict, k5: float | None,
                     k15: float | None) -> PairTrade | None:
-        pair = choose_pair(k5, k15, self.strike_margin)
+        margin = (k15 or 0.0) * self.strike_margin_bp / 1e4
+        pair = choose_pair(k5, k15, margin)
         if pair is None or self._count.get(start15, 0) >= self.max_trades:
             self._pending.pop(start15, None)
             return None
