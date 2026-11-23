@@ -534,3 +534,19 @@ def test_check_by_day_render_and_dashboard(tmp_path):
             fh.write("{}" + chr(10))
     prune(store, 1_800_000_000)                        # 2027-01-15
     assert [p.name for p in store.glob("*.gz")] == ["windows-20300101.jsonl.gz"]
+
+
+def test_dashboard_shows_pair_trades(tmp_path):
+    from btc5m.dashboard import page
+
+    d = tmp_path / "pairs" / "btc"
+    d.mkdir(parents=True)
+    (d / "trades.csv").write_text("ts,start15,pair,shares,p5,p15,cost,k5_est,k15_est\n"
+                                  "1800000000.5,1800000000,a,20.0,0.4,0.5,0.9325,1,2\n", encoding="utf-8")
+    (d / "results.csv").write_text("start15,pair,official_pair,shares,cost,payoff,pnl\n"
+                                   "1800000000,a,a,20.0,0.9325,2.0,21.35\n", encoding="utf-8")
+    (d / "settled.csv").write_text("start15,strike5,strike15,winner5,winner15,final5,final15,k5_est,k15_est\n"
+                                   "1800000000,1,2,UP,DOWN,1.5,1.5,1,2\n", encoding="utf-8")
+    (tmp_path / "paper-rest").mkdir()
+    html = page(tmp_path / "paper-rest", "paper-rest")
+    assert "Nested 5m/15m pairs (paper)" in html and "+21.35" in html and "BTC" in html

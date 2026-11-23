@@ -103,6 +103,60 @@ def _buckets(rows: list[dict], unit: str) -> str:
                    "Hold P&L", "Return"], out)
 
 
+def _pairs_section(directory: Path) -> str:
+    """Paper trades of the nested 5m/15m pair strategy (`python -m btc5m pairs`)."""
+    import csv as _csv
+
+    root = directory.parent / "pairs"
+    if not root.exists():
+        return ""
+
+    def rows(path: Path) -> list[dict]:
+        try:
+            with path.open(encoding="utf-8", newline="") as fh:
+                return list(_csv.DictReader(fh))
+        except OSError:
+            return []
+
+    table, recent = [], []
+    tot_n = tot_open = 0
+    tot_pnl = tot_staked = 0.0
+    for coin_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        trades = rows(coin_dir / "trades.csv")
+        results = rows(coin_dir / "results.csv")
+        settled = rows(coin_dir / "settled.csv")
+        pnl = sum(float(r["pnl"]) for r in results)
+        staked = sum(float(r["shares"]) * float(r["cost"]) for r in results)
+        wrong = sum(r["pair"] != r["official_pair"] for r in results)
+        two = sum(float(r["payoff"]) >= 2 for r in results)
+        table.append([escape(coin_dir.name.upper()), str(len(settled)), str(len(trades)),
+                      str(len(results)), _money(pnl), f"{staked:,.2f}",
+                      _pct(pnl / staked if staked else None), str(two), str(wrong)])
+        tot_n += len(results)
+        tot_open += len(trades) - len(results)
+        tot_pnl += pnl
+        tot_staked += staked
+        for r in trades[-5:]:
+            recent.append([escape(coin_dir.name.upper()),
+                           escape(datetime.fromtimestamp(float(r["ts"]), timezone.utc).strftime("%m-%d %H:%M:%S")),
+                           escape(r["pair"]), f"{float(r['shares']):.2f}", f"{float(r['p5']):.3f}",
+                           f"{float(r['p15']):.3f}", f"{float(r['cost']):.4f}"])
+    if not table:
+        return ""
+    recent.sort(key=lambda r: r[1], reverse=True)
+    return (
+        "<h2>Nested 5m/15m pairs (paper)</h2>"
+        "<p class='note'>Buys the last 5-minute market and the 15-minute market it ends with, "
+        "on the side that pays at least $1 whatever happens ($2 when the price finishes between "
+        "the two starting prices), only when the pair costs under $0.99 with fees on two "
+        f"consecutive order-book snapshots. Settled so far: {tot_n} trades, P&amp;L "
+        f"{_money(tot_pnl)} on {tot_staked:,.2f} staked; {tot_open} waiting for results.</p>"
+        + _table(["Coin", "Markets watched", "Paper buys", "Settled", "P&L", "Staked", "Return",
+                  "Paid $2", "Wrong pairing"], table)
+        + (_table(["Coin", "Time (UTC)", "Pair", "Shares", "5m price", "15m price", "Cost/pair"],
+                  recent[:10]) if recent else ""))
+
+
 def _check_section(directory: Path) -> str:
     """The daily 'holding up?' table written by `check`, if there is one."""
     from . import check
@@ -142,7 +196,8 @@ def page(directory: str | Path, mode: str) -> str:
     if not windows:
         return (head + f"<h1>btc5m <span class='badge'>{escape(mode)}</span></h1>"
                 f"<p class='sub'>No windows logged yet. Checked {stamp}.</p>"
-                + _check_section(Path(directory)) + "</main></body></html>")
+                + _check_section(Path(directory)) + _pairs_section(Path(directory))
+                + "</main></body></html>")
     s = analysis.summary(windows)
     d = analysis.detail(windows, trades)
     age = now - (analysis._ts(windows[-1]["start"]) + 300)
@@ -176,7 +231,7 @@ def page(directory: str | Path, mode: str) -> str:
         f"<p class='sub'>{money} {escape(str(s['first_window']))} to "
         f"{escape(str(s['last_window']))}. Page built {stamp}; refreshes every minute.</p>"
         f'<div class="tiles">{tile_html}</div>'
-        + _check_section(Path(directory)) +
+        + _check_section(Path(directory)) + _pairs_section(Path(directory)) +
         f"<h2>Cumulative profit by traded window</h2><div class='card'>{_chart(analysis.equity(windows))}</div>"
         f"<h2>Buys by entry price</h2>{_buckets(d['by_price'], '')}"
         f"<h2>Buys by seconds left at entry</h2>{_buckets(d['by_time_left'], 's')}"
