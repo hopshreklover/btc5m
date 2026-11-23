@@ -160,6 +160,25 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pairs(args: argparse.Namespace) -> int:
+    import signal
+
+    from .pairs import PairPaper
+    from .pairs_live import run_pairs
+
+    def stop(*_a: object) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop)
+    pp = PairPaper(max_cost=args.max_cost, usd=args.usd, strike_margin=args.strike_margin)
+    out = Path(args.data_dir or Config().data_dir) / "pairs"
+    try:
+        asyncio.run(run_pairs(out, pp, log=lambda m: print(m, flush=True)))
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     from .dashboard import serve
 
@@ -233,6 +252,12 @@ def main(argv: list[str] | None = None) -> int:
     ck.add_argument("--days", type=float, default=14.0)
     ck.add_argument("--no-fetch", action="store_true", help="use what is already downloaded")
 
+    pa = sub.add_parser("pairs", help="paper-trade the nested 5m/15m Bitcoin pair (no orders)")
+    pa.add_argument("--max-cost", type=float, default=0.99, help="per pair, fees included")
+    pa.add_argument("--usd", type=float, default=20.0, help="per paper trade")
+    pa.add_argument("--strike-margin", type=float, default=3.0,
+                    help="skip when the two starting prices are closer than this ($)")
+
     da = sub.add_parser("dashboard", help="serve a read-only results page")
     da.add_argument("--mode", default="paper")
     da.add_argument("--host", default="127.0.0.1")
@@ -246,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_run(args, live=True)
         return {"backtest": cmd_backtest, "fetch": cmd_fetch, "calibrate": cmd_calibrate,
                 "sim": cmd_sim, "report": cmd_report, "dashboard": cmd_dashboard,
-                "history": cmd_history, "check": cmd_check}[args.cmd](args)
+                "history": cmd_history, "check": cmd_check, "pairs": cmd_pairs}[args.cmd](args)
     except ValueError as exc:
         print(f"error: {exc}")
         return 2

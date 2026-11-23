@@ -46,3 +46,12 @@ if __name__ == "__main__":
                   f"median shares available {sorted(sizes)[len(sizes) // 2]:.0f}")
         else:
             print(f"  cost <= {thr:.2f}: none")
+
+    res = d / "results.csv"
+    if res.exists():
+        rs = rows(res)
+        pnl = sum(float(r["pnl"]) for r in rs)
+        wrong = sum(r["pair"] != r["official_pair"] for r in rs)
+        staked = sum(float(r["shares"]) * float(r["cost"]) for r in rs)
+        print(f"paper trades settled: {len(rs)}, P&L {pnl:+.2f} on {staked:.2f} staked, "
+              f"pairing chosen differently from the official strikes in {wrong}")
